@@ -1,0 +1,4 @@
+requests
+boto3
+python-dotenv
+# picamera  # Uncomment on Raspberry Pi hardware
