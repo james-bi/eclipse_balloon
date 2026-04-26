@@ -126,7 +126,7 @@ class TelemetryDispatcher:
         self.flight_log_file = flight_log_file
         self.is_cellular_enabled = True
         self.last_send_time = 0
-        self.send_interval = 30  # seconds for ASCENT_HIGH
+        self.send_interval = 5  # seconds for mocked telemetry loop
 
         if not self.api_url or not self.balloon_id:
             logger.warning(
@@ -523,8 +523,8 @@ class FlightComputer:
                     last_phase = phase
 
                 # Phase-specific telemetry handling
-                if phase == FlightPhase.ASCENT_HIGH:
-                    # Send data every 30 seconds
+                if phase in (FlightPhase.ASCENT_LOW, FlightPhase.ASCENT_HIGH):
+                    # Send mocked telemetry every loop interval (every 5 seconds)
                     if current_time - self.dispatcher.last_send_time >= self.dispatcher.send_interval:
                         self.dispatcher.send_data(telemetry, gps)
                         self.dispatcher.last_send_time = current_time
