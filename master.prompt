@@ -1,0 +1,45 @@
+New task
+
+I am going to fly some weather balloons on and around the Eclipse in Soria, Spain this year from August 8th to 15th.
+The project is educational to help scouts have fun and learn about Space.
+
+We need to program the flight computer on my pi zero, the weight limit is 500 grams, the lift mechanism is a weather balloon filled with 2 cubic meters of helium:
+
+The mission is: To accomplish the following stages of flight:
+
+The pi zero has the following sensors:
+ - gps (sixfab cellular communication hat)
+ - altitude (GY-BME280)
+ - temperature (DS181320)
+ - camera (we'll get to that)
+ - sixfab cellular communication hat
+
+ There is server where information has to be sent, conforming to the attached documentation: API_DOCUMENTATION.md
+
+ All non essential systems on the Pi for this mission, such as HDMI should be powered down to save battery, CRITICAL, unless needed to accomplish the task
+ We will launch a number of balloons, each should have an ID that can be sent to my Django dashboard
+
+ASCENT:
+1: Standby on ground - Connected to a local wifi hotspot and a ground based power bank
+2: First stage of ascent - Camera should take pictures for 1km, calculation based on a timer at 5 meter per second ascent rate
+3: Second stage of ascent - Telemetery, altitude data sent to webserver, no camera pictures, until cellular link lost due to altitude
+4: Third stage of ascent - Cellular link lost due to altitude, power saving until above 24000 km
+5: Fourth stage of ascent - Camera taking pictures and saving locally, every minute until atlitude drops consistenly proving descent
+
+DESCENT:
+1: Save power until descent rate allows for outside chance of not draining battery (5mAh, 18.5vvh)
+2: Connect to cellular - transmit onboard telemetary data to API in API_DOCUMENTATION.md
+3: Connected to cellular - transmit onboard photos to Amazon Web Services S3 in API_DOCUMENTATION.md
+4: Connected to cellular - Mission complete - transmit GPS and telemetery to API to allow for recovery
+5: Final phase - once static, or after calculating landing time via descent rate and expected altitude at landing, 60s before landing, full graceful shutdown, total power off to eliminate risk of fire. We do not want to start an avoidable forest fire.
+
+NOTES:
+1: Descent may begin due to unforseen circumstances at any time. In this event the priority is to transmit telemetary and avoid the risk of a landing where the probe is powered up causing a fire hazard
+
+I have a powered on pi zero and need to get this into place using github codespace, please provide small steps to get this to happen, using codespace gemini agent to build the code.
+
+It should be centered around a simple loop to keep track of time, with variables for flight phases and methods for each phase.
+It should be mockable, to create a simulated flight reported back to my Django instanct via the documented API, that will display in my mission control dashboards
+For now, I cant get the sensors to work, create a version where these are simulated for now, but I can "plumb in" later once I get my soldering iron out
+
+Many thanks

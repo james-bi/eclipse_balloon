@@ -7,6 +7,7 @@ import json
 import os
 import logging
 import urllib.parse
+import subprocess
 from enum import Enum
 from collections import deque
 from dataclasses import dataclass, asdict
@@ -100,6 +101,10 @@ class SensorManager:
         # Mock battery: slowly drains over flight (~0.1% per reading at 5s intervals)
         self.battery_level = max(0, self.battery_level - random.uniform(0, 0.1))
 
+        if self.battery_level < 5.0:
+            logger.critical("BATTERY CRITICALLY LOW (<5%). INITIATING EMERGENCY SHUTDOWN.")
+            subprocess.run(["sudo", "halt", "-p"], check=False)
+
         return Telemetry(
             altitude=round(self.altitude, 2),
             temperature=round(self.temperature, 2),
@@ -135,9 +140,9 @@ class SensorManager:
             except Exception as e:
                 logger.warning(f"Failed to read GPS: {e}")
         
-        # Mock GPS: slight drift from launch point (assuming somewhere over continental US)
-        latitude = 40.0 + random.uniform(-0.01, 0.01)
-        longitude = -105.0 + random.uniform(-0.01, 0.01)
+        # Mock GPS: slight drift from launch point (assuming somewhere over Madrid, Spain)
+        latitude = 40.4168 + random.uniform(-0.01, 0.01)
+        longitude = -3.7038 + random.uniform(-0.01, 0.01)
         satellites = random.randint(8, 12)
         altitude = self.altitude  # Use the mock altitude
 
@@ -206,7 +211,7 @@ class TelemetryDispatcher:
 
             url = self._resolve_url("/api/telemetry/receive/")
             
-            if self.debug:
+            if True:
                 print("=" * 70)
                 print("DEBUG: API REQUEST")
                 print("=" * 70)
@@ -222,7 +227,7 @@ class TelemetryDispatcher:
                 timeout=10,
             )
             
-            if self.debug:
+            if True:
                 print("=" * 70)
                 print("DEBUG: API RESPONSE")
                 print("=" * 70)
@@ -295,11 +300,30 @@ class TelemetryDispatcher:
             success_count = 0
             for entry in log_data:
                 try:
+                    url = self._resolve_url("/api/telemetry/receive/")
+                    print("=" * 70)
+                    print("DEBUG: API REQUEST (DUMP LOG)")
+                    print("=" * 70)
+                    print(f"URL: {url}")
+                    print(f"Method: POST")
+                    print(f"Headers: {{'Content-Type': 'application/json'}}")
+                    print(f"Payload: {json.dumps(entry, indent=2)}")
+                    print()
+                    
                     response = requests.post(
-                        self._resolve_url("/api/telemetry/receive/"),
+                        url,
                         json=entry,
                         timeout=10,
                     )
+                    
+                    print("=" * 70)
+                    print("DEBUG: API RESPONSE (DUMP LOG)")
+                    print("=" * 70)
+                    print(f"Status Code: {response.status_code}")
+                    print(f"Response Headers: {dict(response.headers)}")
+                    print(f"Response Body: {response.text}")
+                    print()
+                    
                     response.raise_for_status()
                     success_count += 1
                 except requests.exceptions.RequestException as e:
@@ -435,11 +459,30 @@ class SafetyManager:
                 "event_type": "LANDING",
             }
 
+            url = self.dispatcher._resolve_url("/api/telemetry/receive/")
+            print("=" * 70)
+            print("DEBUG: API REQUEST (GPS PING)")
+            print("=" * 70)
+            print(f"URL: {url}")
+            print(f"Method: POST")
+            print(f"Headers: {{'Content-Type': 'application/json'}}")
+            print(f"Payload: {json.dumps(payload, indent=2)}")
+            print()
+
             response = requests.post(
-                self.dispatcher._resolve_url("/api/telemetry/receive/"),
+                url,
                 json=payload,
                 timeout=10,
             )
+
+            print("=" * 70)
+            print("DEBUG: API RESPONSE (GPS PING)")
+            print("=" * 70)
+            print(f"Status Code: {response.status_code}")
+            print(f"Response Headers: {dict(response.headers)}")
+            print(f"Response Body: {response.text}")
+            print()
+
             response.raise_for_status()
             logger.info(f"Final GPS PING sent: {payload}")
             return True
@@ -483,12 +526,55 @@ class SafetyManager:
         except Exception as e:
             logger.error(f"Error sending final GPS ping: {e}")
 
-        # Step 3: Execute system halt (mocked)
+        # Step 3: Execute system halt
         logger.critical("Executing system halt command...")
-        logger.critical("[MOCK] sudo halt -p (Power off)")
+        subprocess.run(["sudo", "halt", "-p"], check=False)
         logger.critical("System will shut down in 5 seconds...")
         time.sleep(5)
         logger.critical("BALLOON LANDED AND SHUT DOWN SUCCESSFULLY")
+
+
+class HardwareManager:
+    """Manages hardware-specific power and modems."""
+
+    def power_save(self) -> None:
+        """Run tvservice -o to disable HDMI and save battery."""
+        try:
+            logger.info("Disabling HDMI to save power...")
+            subprocess.run(["tvservice", "-o"], check=False)
+        except Exception as e:
+            logger.error(f"Failed to disable HDMI: {e}")
+
+    def wake_modem(self) -> None:
+        """Pulse GPIO 22 using pinctrl to wake the Sixfab HAT."""
+        try:
+            logger.info("Waking up modem on GPIO 22...")
+            subprocess.run(["pinctrl", "set", "22", "op", "dh"], check=False)
+            time.sleep(2)
+            subprocess.run(["pinctrl", "set", "22", "op", "dl"], check=False)
+        except Exception as e:
+            logger.error(f"Failed to wake modem: {e}")
+
+    def shutdown_system(self) -> None:
+        """Run sudo halt -p for the final fire-safety shutdown."""
+        try:
+            logger.critical("Executing system halt command (sudo halt -p)...")
+            subprocess.run(["sudo", "halt", "-p"], check=False)
+        except Exception as e:
+            logger.error(f"Failed to execute shutdown: {e}")
+
+    def manage_network(self) -> None:
+        """Configure usb0 interface and routing."""
+        try:
+            if os.path.exists("/sys/class/net/usb0"):
+                logger.info("Found usb0 interface, configuring network...")
+                subprocess.run(["sudo", "ip", "link", "set", "usb0", "up"], check=False)
+                subprocess.run(["sudo", "dhclient", "usb0"], check=False)
+                subprocess.run(["sudo", "ip", "route", "add", "default", "via", "192.168.225.1", "dev", "usb0", "metric", "800"], check=False)
+            else:
+                logger.warning("usb0 interface not found, skipping network configuration.")
+        except Exception as e:
+            logger.error(f"Failed to manage network: {e}")
 
 
 class FlightComputer:
@@ -504,6 +590,7 @@ class FlightComputer:
         self.sensor_manager = SensorManager()
         self.dispatcher = TelemetryDispatcher()
         self.safety_manager = SafetyManager(self.dispatcher)
+        self.hardware_manager = HardwareManager()
         self.current_phase = FlightPhase.GROUND
         self.altitude_history = deque(maxlen=descent_threshold)
         self.descent_threshold = descent_threshold
@@ -560,6 +647,7 @@ class FlightComputer:
         start_time = time.time()
         iteration = 0
         last_phase = None
+        last_network_manage_time = 0
 
         try:
             while time.time() - start_time < duration:
@@ -576,6 +664,11 @@ class FlightComputer:
                 # Handle phase transitions
                 if phase != last_phase:
                     logger.info(f"Phase transition: {last_phase} -> {phase.value}")
+                    
+                    # GROUND phase setup
+                    if phase == FlightPhase.GROUND:
+                        self.hardware_manager.wake_modem()
+                        self.hardware_manager.manage_network()
                     
                     # NEAR_SPACE: disable cellular and begin logging
                     if phase == FlightPhase.NEAR_SPACE:
@@ -603,6 +696,11 @@ class FlightComputer:
                 elif phase == FlightPhase.DESCENT:
                     # Attempt to send in real-time
                     self.dispatcher.send_data(telemetry, gps)
+                    
+                    # Manage network every 60 seconds to grab a tower IP
+                    if current_time - last_network_manage_time >= 60:
+                        self.hardware_manager.manage_network()
+                        last_network_manage_time = current_time
 
                 # Safety check: Monitor for landing
                 if phase == FlightPhase.DESCENT:
