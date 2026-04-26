@@ -8,6 +8,7 @@ import os
 import logging
 import urllib.parse
 import subprocess
+import threading
 from enum import Enum
 from collections import deque
 from dataclasses import dataclass, asdict
@@ -593,6 +594,135 @@ class HardwareManager:
             logger.error(f"Failed to manage network: {e}")
 
 
+class NetworkHealer(threading.Thread):
+    """Background thread to monitor and heal cellular connection."""
+
+    def __init__(self, hardware_manager: HardwareManager, sensor_manager: SensorManager):
+        super().__init__(daemon=True)
+        self.hardware = hardware_manager
+        self.sensors = sensor_manager
+        self.running = True
+        self.healing_paused = False
+        self.check_interval = 10  # seconds
+        self.consecutive_failures = 0
+
+    def check_connection(self) -> bool:
+        """Ping 8.8.8.8 to verify connectivity."""
+        try:
+            # -c 1 = 1 packet, -W 5 = 5 sec timeout
+            result = subprocess.run(["ping", "-c", "1", "-W", "5", "8.8.8.8"], capture_output=True)
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def get_public_ip(self) -> str:
+        try:
+            result = subprocess.run(["curl", "-s", "--connect-timeout", "5", "https://api.ipify.org"], capture_output=True, text=True)
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except Exception:
+            pass
+        return "Unknown"
+
+    def get_tailscale_ip(self) -> str:
+        try:
+            result = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except Exception:
+            pass
+        return "Unknown"
+
+    def notify_webhook(self, public_ip: str, tailscale_ip: str) -> None:
+        webhook_url = os.getenv("WEBHOOK_URL")
+        if not webhook_url:
+            return
+        try:
+            payload = {
+                "text": f"🚀 Eclipse Balloon Connection Re-established!\\n**Public IP:** {public_ip}\\n**Tailscale IP:** {tailscale_ip}"
+            }
+            requests.post(webhook_url, json=payload, timeout=5)
+            logger.info("Sent webhook notification.")
+        except Exception as e:
+            logger.error(f"Failed to send webhook: {e}")
+
+    def heal_connection(self) -> bool:
+        logger.warning(f"Connection lost. Failure {self.consecutive_failures}. Attempting to heal...")
+        
+        # Level 1: Manage network (ip link, dhclient, routes)
+        self.hardware.manage_network()
+        if self.check_connection():
+            return True
+            
+        # Level 2: mmcli soft reset (dynamic targeting)
+        if self.consecutive_failures >= 2:
+            logger.warning("Level 2 Healing: Soft resetting modem via mmcli -m any")
+            subprocess.run(["mmcli", "-m", "any", "--reset"], check=False)
+            time.sleep(10)  # Give modem time to restart
+            self.hardware.manage_network()
+            if self.check_connection():
+                return True
+                
+        # Level 3: Physical GPIO power cycle
+        if self.consecutive_failures >= 4:
+            logger.critical("Level 3 Healing: Hard power cycle via GPIO 22")
+            self.hardware.wake_modem()  # Pulses GPIO 22
+            time.sleep(15)  # Give modem time to boot
+            self.hardware.manage_network()
+            if self.check_connection():
+                return True
+                
+        return False
+
+    def run(self) -> None:
+        was_connected = True
+        
+        while self.running:
+            try:
+                # Use current altitude
+                altitude = self.sensors.altitude
+                
+                # Altitude-Aware Connectivity
+                if not self.healing_paused and altitude > 15000:
+                    logger.info("Altitude > 15000m. Pausing connection healing to save battery.")
+                    self.healing_paused = True
+                elif self.healing_paused and altitude < 12000:
+                    logger.info("Altitude < 12000m. Resuming connection healing.")
+                    self.healing_paused = False
+                    
+                if self.healing_paused:
+                    time.sleep(self.check_interval)
+                    continue
+                    
+                # Low-Level Pings
+                is_connected = self.check_connection()
+                
+                if is_connected:
+                    if not was_connected:
+                        logger.info("Connection re-established!")
+                        public_ip = self.get_public_ip()
+                        tailscale_ip = self.get_tailscale_ip()
+                        self.notify_webhook(public_ip, tailscale_ip)
+                    self.consecutive_failures = 0
+                    was_connected = True
+                else:
+                    was_connected = False
+                    self.consecutive_failures += 1
+                    healed = self.heal_connection()
+                    if healed:
+                        logger.info("Connection successfully healed!")
+                        public_ip = self.get_public_ip()
+                        tailscale_ip = self.get_tailscale_ip()
+                        self.notify_webhook(public_ip, tailscale_ip)
+                        self.consecutive_failures = 0
+                        was_connected = True
+
+            except Exception as e:
+                logger.error(f"Error in NetworkHealer: {e}")
+                
+            time.sleep(self.check_interval)
+
+
 class FlightComputer:
     """Main flight computer logic."""
 
@@ -607,6 +737,7 @@ class FlightComputer:
         self.dispatcher = TelemetryDispatcher()
         self.safety_manager = SafetyManager(self.dispatcher)
         self.hardware_manager = HardwareManager()
+        self.network_healer = NetworkHealer(self.hardware_manager, self.sensor_manager)
         self.current_phase = FlightPhase.GROUND
         self.altitude_history = deque(maxlen=descent_threshold)
         self.descent_threshold = descent_threshold
@@ -664,6 +795,8 @@ class FlightComputer:
         iteration = 0
         last_phase = None
         last_network_manage_time = 0
+
+        self.network_healer.start()
 
         try:
             while time.time() - start_time < duration:
@@ -765,6 +898,9 @@ class FlightComputer:
             print("\n" + "=" * 70)
             print("Flight loop interrupted by user")
             print("=" * 70)
+        finally:
+            self.network_healer.running = False
+            self.network_healer.join(timeout=2)
 
 
 if __name__ == "__main__":
