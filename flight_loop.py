@@ -5,6 +5,7 @@ import time
 import random
 import json
 import os
+import argparse
 import logging
 import urllib.parse
 import subprocess
@@ -87,10 +88,10 @@ class SensorManager:
         """
         # Altitude: use GPS if real, else mock
         if not self.use_real_gps:
-            # Mock altitude: increase by 50-150m per reading (ascent phase)
+            # Mock altitude: consistently increase during ascent phase
             # Simulate realistic sensor variations
-            altitude_change = random.uniform(-100, 200)
-            self.altitude = max(0, self.altitude + altitude_change)
+            altitude_change = random.uniform(50, 200)
+            self.altitude = self.altitude + altitude_change
 
         # Mock temperature: decreases with altitude (~6.5°C per 1000m) - since sensor not working
         self.temperature = 15.0 - (self.altitude / 1000.0) * 6.5
@@ -741,6 +742,7 @@ class FlightComputer:
         self.current_phase = FlightPhase.GROUND
         self.altitude_history = deque(maxlen=descent_threshold)
         self.descent_threshold = descent_threshold
+        self.max_altitude = 0.0
 
     def update_phase(self, altitude: float) -> FlightPhase:
         """
@@ -752,15 +754,17 @@ class FlightComputer:
         Returns:
             Updated flight phase.
         """
+        self.max_altitude = max(self.max_altitude, altitude)
         self.altitude_history.append(altitude)
 
-        # Check for descent: 3 consecutive readings with decreasing altitude
+        # Check for descent: 3 consecutive readings with decreasing altitude, and only if max_altitude > 4000m
         in_descent = (
             len(self.altitude_history) == self.descent_threshold
             and all(
                 self.altitude_history[i] > self.altitude_history[i + 1]
                 for i in range(len(self.altitude_history) - 1)
             )
+            and self.max_altitude > 4000
         )
 
         if in_descent and self.current_phase not in (FlightPhase.DESCENT, FlightPhase.LANDED):
@@ -904,5 +908,12 @@ class FlightComputer:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Eclipse Balloon Flight Computer")
+    parser.add_argument("--name", type=str, help="Override the balloon ID/name from .env")
+    args = parser.parse_args()
+
+    if args.name:
+        os.environ["BALLOON_ID"] = args.name
+
     flight_computer = FlightComputer()
     flight_computer.run()

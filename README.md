@@ -4,6 +4,12 @@ Welcome to the brains of the Eclipse Balloon project! This is the actual code th
 
 Whether you're a Scout working on your STEM badges or an aspiring rocket scientist, this guide will show you exactly how our spacecraft thinks and operates.
 
+### 🚀 Quick Start: Naming Your Balloon
+When starting the flight computer, you can give your balloon a custom name (which overrides the `BALLOON_ID` in your `.env` file) by passing the `--name` argument:
+```bash
+python3 flight_loop.py --name "SCOUT_ECLIPSE_1"
+```
+
 ---
 
 ## 🧠 How the Computer Works
