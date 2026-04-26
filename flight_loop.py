@@ -69,6 +69,7 @@ class SensorManager:
         self.pressure = 1013.25
         self.battery_level = 100.0
         self.use_real_gps = os.getenv("USE_REAL_GPS", "false").lower() == "true"
+        self.last_known_gps = None
         if self.use_real_gps and GPSDSocket:
             self.gps_socket = GPSDSocket()
             self.gps_socket.connect()
@@ -119,26 +120,38 @@ class SensorManager:
         Returns:
             GPS object with latitude, longitude, and satellite count.
         """
-        if self.use_real_gps and self.gps_socket:
-            try:
-                for new_data in self.gps_socket:
-                    if new_data:
-                        if hasattr(new_data, 'TPV') and 'lat' in new_data.TPV and 'lon' in new_data.TPV:
-                            latitude = float(new_data.TPV['lat'])
-                            longitude = float(new_data.TPV['lon'])
-                            altitude = float(new_data.TPV.get('alt', 0.0))
-                            satellites = len(new_data.SKY.get('satellites', [])) if hasattr(new_data, 'SKY') else 0
-                            # Update altitude from GPS
-                            self.altitude = altitude
-                            return GPS(
-                                latitude=round(latitude, 6),
-                                longitude=round(longitude, 6),
-                                altitude=round(altitude, 2),
-                                satellites=satellites,
-                            )
-                # If no data, fall back to mock
-            except Exception as e:
-                logger.warning(f"Failed to read GPS: {e}")
+        if self.use_real_gps:
+            if self.gps_socket:
+                try:
+                    for new_data in self.gps_socket:
+                        if new_data:
+                            mode = getattr(new_data.TPV, 'mode', 0) if hasattr(new_data, 'TPV') else 0
+                            if hasattr(new_data, 'TPV') and 'lat' in new_data.TPV and 'lon' in new_data.TPV and mode >= 2:
+                                latitude = float(new_data.TPV['lat'])
+                                longitude = float(new_data.TPV['lon'])
+                                altitude = float(new_data.TPV.get('alt', 0.0))
+                                satellites = len(new_data.SKY.get('satellites', [])) if hasattr(new_data, 'SKY') else 0
+                                # Update altitude from GPS
+                                self.altitude = altitude
+                                
+                                current_gps = GPS(
+                                    latitude=round(latitude, 6),
+                                    longitude=round(longitude, 6),
+                                    altitude=round(altitude, 2),
+                                    satellites=satellites,
+                                )
+                                self.last_known_gps = current_gps
+                                return current_gps
+                            elif mode == 1:
+                                logger.info("Waiting for GPS Fix...")
+                except Exception as e:
+                    logger.warning(f"Failed to read GPS: {e}")
+            
+            if self.last_known_gps:
+                return self.last_known_gps
+            
+            logger.info("Waiting for GPS Fix (No data yet)...")
+            return GPS(latitude=0.0, longitude=0.0, altitude=0.0, satellites=0)
         
         # Mock GPS: slight drift from launch point (assuming somewhere over Madrid, Spain)
         latitude = 40.4168 + random.uniform(-0.01, 0.01)
@@ -552,6 +565,9 @@ class HardwareManager:
             subprocess.run(["pinctrl", "set", "22", "op", "dh"], check=False)
             time.sleep(2)
             subprocess.run(["pinctrl", "set", "22", "op", "dl"], check=False)
+            
+            logger.info("Sending AT+QGPS=1 to power on GPS engine...")
+            subprocess.run("echo -e 'AT+QGPS=1\\r' > /dev/ttyUSB2", shell=True, check=False)
         except Exception as e:
             logger.error(f"Failed to wake modem: {e}")
 
