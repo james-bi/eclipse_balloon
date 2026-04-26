@@ -14,6 +14,10 @@ from typing import Dict, List, Optional
 
 import requests
 from dotenv import load_dotenv
+try:
+    from gpsd_py3 import GPSDSocket
+except ImportError:
+    GPSDSocket = None
 
 # Load environment variables
 load_dotenv()
@@ -50,6 +54,7 @@ class GPS:
     """GPS data structure."""
     latitude: float
     longitude: float
+    altitude: float
     satellites: int
 
 
@@ -62,6 +67,13 @@ class SensorManager:
         self.temperature = 15.0
         self.pressure = 1013.25
         self.battery_level = 100.0
+        self.use_real_gps = os.getenv("USE_REAL_GPS", "false").lower() == "true"
+        if self.use_real_gps and GPSDSocket:
+            self.gps_socket = GPSDSocket()
+            self.gps_socket.connect()
+            self.gps_socket.watch()
+        else:
+            self.gps_socket = None
 
     def get_telemetry(self) -> Telemetry:
         """
@@ -70,12 +82,14 @@ class SensorManager:
         Returns:
             Telemetry object with altitude, temperature, pressure, and battery level.
         """
-        # Mock altitude: increase by 50-150m per reading (ascent phase)
-        # Simulate realistic sensor variations
-        altitude_change = random.uniform(-100, 200)
-        self.altitude = max(0, self.altitude + altitude_change)
+        # Altitude: use GPS if real, else mock
+        if not self.use_real_gps:
+            # Mock altitude: increase by 50-150m per reading (ascent phase)
+            # Simulate realistic sensor variations
+            altitude_change = random.uniform(-100, 200)
+            self.altitude = max(0, self.altitude + altitude_change)
 
-        # Mock temperature: decreases with altitude (~6.5°C per 1000m)
+        # Mock temperature: decreases with altitude (~6.5°C per 1000m) - since sensor not working
         self.temperature = 15.0 - (self.altitude / 1000.0) * 6.5
         self.temperature += random.uniform(-0.5, 0.5)
 
@@ -100,14 +114,37 @@ class SensorManager:
         Returns:
             GPS object with latitude, longitude, and satellite count.
         """
+        if self.use_real_gps and self.gps_socket:
+            try:
+                for new_data in self.gps_socket:
+                    if new_data:
+                        if hasattr(new_data, 'TPV') and 'lat' in new_data.TPV and 'lon' in new_data.TPV:
+                            latitude = float(new_data.TPV['lat'])
+                            longitude = float(new_data.TPV['lon'])
+                            altitude = float(new_data.TPV.get('alt', 0.0))
+                            satellites = len(new_data.SKY.get('satellites', [])) if hasattr(new_data, 'SKY') else 0
+                            # Update altitude from GPS
+                            self.altitude = altitude
+                            return GPS(
+                                latitude=round(latitude, 6),
+                                longitude=round(longitude, 6),
+                                altitude=round(altitude, 2),
+                                satellites=satellites,
+                            )
+                # If no data, fall back to mock
+            except Exception as e:
+                logger.warning(f"Failed to read GPS: {e}")
+        
         # Mock GPS: slight drift from launch point (assuming somewhere over continental US)
         latitude = 40.0 + random.uniform(-0.01, 0.01)
         longitude = -105.0 + random.uniform(-0.01, 0.01)
         satellites = random.randint(8, 12)
+        altitude = self.altitude  # Use the mock altitude
 
         return GPS(
             latitude=round(latitude, 6),
             longitude=round(longitude, 6),
+            altitude=round(altitude, 2),
             satellites=satellites,
         )
 
@@ -128,6 +165,7 @@ class TelemetryDispatcher:
         self.is_cellular_enabled = True
         self.last_send_time = 0
         self.send_interval = 5  # seconds for mocked telemetry loop
+        self.debug = os.getenv("DEBUG", "false").lower() == "true"
 
         if not self.api_url or not self.balloon_id:
             logger.warning(
@@ -166,11 +204,33 @@ class TelemetryDispatcher:
                 "battery_level": telemetry.battery_level,
             }
 
+            url = self._resolve_url("/api/telemetry/receive/")
+            
+            if self.debug:
+                print("=" * 70)
+                print("DEBUG: API REQUEST")
+                print("=" * 70)
+                print(f"URL: {url}")
+                print(f"Method: POST")
+                print(f"Headers: {{'Content-Type': 'application/json'}}")
+                print(f"Payload: {json.dumps(payload, indent=2)}")
+                print()
+
             response = requests.post(
-                self._resolve_url("/api/telemetry/receive/"),
+                url,
                 json=payload,
                 timeout=10,
             )
+            
+            if self.debug:
+                print("=" * 70)
+                print("DEBUG: API RESPONSE")
+                print("=" * 70)
+                print(f"Status Code: {response.status_code}")
+                print(f"Response Headers: {dict(response.headers)}")
+                print(f"Response Body: {response.text}")
+                print()
+
             response.raise_for_status()
             logger.info(f"Telemetry sent successfully: {payload}")
             return True
@@ -507,8 +567,8 @@ class FlightComputer:
                 current_time = time.time()
 
                 # Get sensor data
-                telemetry = self.sensor_manager.get_telemetry()
                 gps = self.sensor_manager.get_gps()
+                telemetry = self.sensor_manager.get_telemetry()
 
                 # Update flight phase
                 phase = self.update_phase(telemetry.altitude)
