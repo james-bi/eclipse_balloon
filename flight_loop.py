@@ -6,6 +6,7 @@ import random
 import json
 import os
 import logging
+import urllib.parse
 from enum import Enum
 from collections import deque
 from dataclasses import dataclass, asdict
@@ -134,6 +135,12 @@ class TelemetryDispatcher:
                 "Data transmission will be simulated."
             )
 
+    def _resolve_url(self, path: str) -> str:
+        """Resolve the final API endpoint URL safely."""
+        if not self.api_url:
+            return path
+        return urllib.parse.urljoin(self.api_url.rstrip('/') + '/', path.lstrip('/'))
+
     def send_data(self, telemetry: Telemetry, gps: GPS) -> bool:
         """
         Send telemetry data to API via HTTP POST.
@@ -160,7 +167,7 @@ class TelemetryDispatcher:
             }
 
             response = requests.post(
-                f"{self.api_url}/api/telemetry/receive/",
+                self._resolve_url("/api/telemetry/receive/"),
                 json=payload,
                 timeout=10,
             )
@@ -229,7 +236,7 @@ class TelemetryDispatcher:
             for entry in log_data:
                 try:
                     response = requests.post(
-                        f"{self.api_url}/api/telemetry/receive/",
+                        self._resolve_url("/api/telemetry/receive/"),
                         json=entry,
                         timeout=10,
                     )
@@ -369,7 +376,7 @@ class SafetyManager:
             }
 
             response = requests.post(
-                f"{self.dispatcher.api_url}/api/telemetry/receive/",
+                self.dispatcher._resolve_url("/api/telemetry/receive/"),
                 json=payload,
                 timeout=10,
             )
