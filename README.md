@@ -4,10 +4,15 @@ Welcome to the brains of the Eclipse Balloon project! This is the actual code th
 
 Whether you're a Scout working on your STEM badges or an aspiring rocket scientist, this guide will show you exactly how our spacecraft thinks and operates.
 
-### 🚀 Quick Start: Naming Your Balloon
+### 🚀 Quick Start
 When starting the flight computer, you can give your balloon a custom name (which overrides the `BALLOON_ID` in your `.env` file) by passing the `--name` argument:
 ```bash
 python3 flight_loop.py --name "SCOUT_ECLIPSE_1"
+```
+
+To test the cellular connection while maintaining local network access (e.g., for SSH), use the `--no-wifi` flag. This will remove the default internet route on the WiFi interface, forcing outbound internet traffic to use the cellular connection:
+```bash
+python3 flight_loop.py --no-wifi
 ```
 
 ---

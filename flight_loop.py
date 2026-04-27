@@ -552,6 +552,9 @@ class SafetyManager:
 class HardwareManager:
     """Manages hardware-specific power and modems."""
 
+    def __init__(self, no_wifi: bool = False):
+        self.no_wifi = no_wifi
+
     def power_save(self) -> None:
         """Run tvservice -o to disable HDMI and save battery."""
         try:
@@ -584,13 +587,34 @@ class HardwareManager:
     def manage_network(self) -> None:
         """Configure usb0 interface and routing."""
         try:
+            if self.no_wifi:
+                logger.info("Disabling default route on wlan0 to force cellular testing...")
+                subprocess.run(["sudo", "ip", "route", "del", "default", "dev", "wlan0"], check=False)
+
             if os.path.exists("/sys/class/net/usb0"):
                 logger.info("Found usb0 interface, configuring network...")
                 subprocess.run(["sudo", "ip", "link", "set", "usb0", "up"], check=False)
                 subprocess.run(["sudo", "dhclient", "usb0"], check=False)
                 subprocess.run(["sudo", "ip", "route", "add", "default", "via", "192.168.225.1", "dev", "usb0", "metric", "800"], check=False)
+                
+                logger.info("--- Cellular Debugging Info ---")
+                usb0_addr = subprocess.run(["ip", "addr", "show", "usb0"], capture_output=True, text=True)
+                logger.info(f"usb0 IP Configuration:\\n{usb0_addr.stdout}")
+                routes = subprocess.run(["ip", "route"], capture_output=True, text=True)
+                logger.info(f"Routing Table:\\n{routes.stdout}")
+                mmcli = subprocess.run(["mmcli", "-m", "any"], capture_output=True, text=True)
+                logger.info(f"Modem Status:\\n{mmcli.stdout}")
+                lsusb = subprocess.run(["lsusb"], capture_output=True, text=True)
+                logger.info(f"USB Devices:\\n{lsusb.stdout}")
+                logger.info("-------------------------------")
             else:
                 logger.warning("usb0 interface not found, skipping network configuration.")
+                logger.info("--- Cellular Debugging Info (Missing usb0) ---")
+                lsusb = subprocess.run(["lsusb"], capture_output=True, text=True)
+                logger.info(f"USB Devices:\\n{lsusb.stdout}")
+                mmcli = subprocess.run(["mmcli", "-m", "any"], capture_output=True, text=True)
+                logger.info(f"Modem Status:\\n{mmcli.stdout}")
+                logger.info("----------------------------------------------")
         except Exception as e:
             logger.error(f"Failed to manage network: {e}")
 
@@ -727,17 +751,18 @@ class NetworkHealer(threading.Thread):
 class FlightComputer:
     """Main flight computer logic."""
 
-    def __init__(self, descent_threshold: int = 3):
+    def __init__(self, descent_threshold: int = 3, no_wifi: bool = False):
         """
         Initialize flight computer.
         
         Args:
             descent_threshold: Number of consecutive readings to trigger descent phase.
+            no_wifi: Stop using WiFi for internet to force cellular connection testing.
         """
         self.sensor_manager = SensorManager()
         self.dispatcher = TelemetryDispatcher()
         self.safety_manager = SafetyManager(self.dispatcher)
-        self.hardware_manager = HardwareManager()
+        self.hardware_manager = HardwareManager(no_wifi=no_wifi)
         self.network_healer = NetworkHealer(self.hardware_manager, self.sensor_manager)
         self.current_phase = FlightPhase.GROUND
         self.altitude_history = deque(maxlen=descent_threshold)
@@ -910,10 +935,11 @@ class FlightComputer:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Eclipse Balloon Flight Computer")
     parser.add_argument("--name", type=str, help="Override the balloon ID/name from .env")
+    parser.add_argument("--no-wifi", action="store_true", help="Stop using WiFi for internet (removes wlan0 default route)")
     args = parser.parse_args()
 
     if args.name:
         os.environ["BALLOON_ID"] = args.name
 
-    flight_computer = FlightComputer()
+    flight_computer = FlightComputer(no_wifi=args.no_wifi)
     flight_computer.run()
