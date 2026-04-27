@@ -98,7 +98,7 @@ class SensorManager:
         self.temperature += random.uniform(-0.5, 0.5)
 
         # Mock pressure: decreases exponentially with altitude
-        self.pressure = 1013.25 * (1 - self.altitude / 44330) ** 5.255
+        self.pressure = 1013.25 * max(0.0, 1 - self.altitude / 44330) ** 5.255
         self.pressure += random.uniform(-1, 1)
 
         # Mock battery: slowly drains over flight (~0.1% per reading at 5s intervals)
@@ -392,7 +392,7 @@ class SafetyManager:
         Calculate descent rate based on recent altitude history.
         
         Returns:
-            Descent rate in m/s (negative), or None if insufficient data.
+            Descent rate in m/s (positive when descending), or None if insufficient data.
         """
         if len(self.altitude_history) < 2:
             return None
@@ -418,7 +418,7 @@ class SafetyManager:
         """
         descent_rate = self.calculate_descent_rate()
         
-        if descent_rate is None or descent_rate >= 0:
+        if descent_rate is None or descent_rate <= 0:
             return None  # Not descending yet or not enough data
 
         # Estimate time to reach ground (0m)
@@ -827,11 +827,11 @@ class FlightComputer:
                     if phase == FlightPhase.NEAR_SPACE:
                         self.dispatcher.disable_cellular()
                     
-                    # DESCENT: reconnect and dump log
-                    elif phase == FlightPhase.DESCENT:
+                    # DESCENT or LANDED: reconnect and dump log
+                    elif phase in (FlightPhase.DESCENT, FlightPhase.LANDED):
                         self.dispatcher.enable_cellular()
-                        logger.info("Attempting to dump flight log to API...")
-                        self.dispatcher.dump_log_to_api()
+                        logger.info("Attempting to dump flight log to API in background...")
+                        threading.Thread(target=self.dispatcher.dump_log_to_api, daemon=True).start()
                     
                     last_phase = phase
 
@@ -846,7 +846,7 @@ class FlightComputer:
                     # Save to local log (offline mode)
                     self.dispatcher.save_to_log(telemetry, gps)
 
-                elif phase == FlightPhase.DESCENT:
+                elif phase in (FlightPhase.DESCENT, FlightPhase.LANDED):
                     # Attempt to send in real-time
                     self.dispatcher.send_data(telemetry, gps)
                     
@@ -856,8 +856,8 @@ class FlightComputer:
                         last_network_manage_time = current_time
 
                 # Safety check: Monitor for landing
-                if phase == FlightPhase.DESCENT:
-                    if self.safety_manager.check_landing_imminent(telemetry.altitude):
+                if phase in (FlightPhase.DESCENT, FlightPhase.LANDED):
+                    if phase == FlightPhase.LANDED or self.safety_manager.check_landing_imminent(telemetry.altitude):
                         # Print final status before shutdown
                         elapsed = int(time.time() - start_time)
                         print(f"[{elapsed:04d}s] Iteration {iteration}")
