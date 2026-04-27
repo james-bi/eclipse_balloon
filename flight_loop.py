@@ -18,9 +18,9 @@ from typing import Dict, List, Optional
 import requests
 from dotenv import load_dotenv
 try:
-    from gpsd_py3 import GPSDSocket
+    import gpsd
 except ImportError:
-    GPSDSocket = None
+    gpsd = None
 
 # Load environment variables
 load_dotenv()
@@ -72,12 +72,13 @@ class SensorManager:
         self.battery_level = 100.0
         self.use_real_gps = os.getenv("USE_REAL_GPS", "false").lower() == "true"
         self.last_known_gps = None
-        if self.use_real_gps and GPSDSocket:
-            self.gps_socket = GPSDSocket()
-            self.gps_socket.connect()
-            self.gps_socket.watch()
-        else:
-            self.gps_socket = None
+        self.gpsd_connected = False
+        if self.use_real_gps and gpsd:
+            try:
+                gpsd.connect()
+                self.gpsd_connected = True
+            except Exception as e:
+                logger.warning(f"Failed to connect to gpsd: {e}")
 
     def get_telemetry(self) -> Telemetry:
         """
@@ -115,6 +116,39 @@ class SensorManager:
             battery_level=round(self.battery_level, 2),
         )
 
+    def _read_sixfab_nmea(self) -> Optional[GPS]:
+        """Fallback to directly reading NMEA from Sixfab ttyUSB1."""
+        if not os.path.exists('/dev/ttyUSB1'):
+            return None
+        try:
+            # Read a GGA line with timeout. GGA contains altitude, sats, and fix quality.
+            cmd = "timeout 2 cat /dev/ttyUSB1 | grep -E '\\$GPGGA|\\$GNGGA' | head -n 1"
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            if result.returncode == 0 and result.stdout.strip():
+                line = result.stdout.strip()
+                parts = line.split(',')
+                if len(parts) >= 10 and parts[6] != '0':  # 0 means invalid fix
+                    lat_raw, lat_dir = parts[2], parts[3]
+                    lon_raw, lon_dir = parts[4], parts[5]
+                    sats, alt_raw = parts[7], parts[9]
+                    
+                    if lat_raw and lon_raw and alt_raw:
+                        lat = float(lat_raw[:2]) + float(lat_raw[2:])/60.0
+                        if lat_dir == 'S': lat = -lat
+                        
+                        lon = float(lon_raw[:3]) + float(lon_raw[3:])/60.0
+                        if lon_dir == 'W': lon = -lon
+                        
+                        return GPS(
+                            latitude=round(lat, 6),
+                            longitude=round(lon, 6),
+                            altitude=round(float(alt_raw), 2),
+                            satellites=int(sats)
+                        )
+        except Exception as e:
+            logger.debug(f"Direct NMEA read failed: {e}")
+        return None
+
     def get_gps(self) -> GPS:
         """
         Get GPS data from receiver.
@@ -123,36 +157,51 @@ class SensorManager:
             GPS object with latitude, longitude, and satellite count.
         """
         if self.use_real_gps:
-            if self.gps_socket:
+            # Try to connect to gpsd if not connected
+            if not self.gpsd_connected and gpsd:
                 try:
-                    for new_data in self.gps_socket:
-                        if new_data:
-                            mode = getattr(new_data.TPV, 'mode', 0) if hasattr(new_data, 'TPV') else 0
-                            if hasattr(new_data, 'TPV') and 'lat' in new_data.TPV and 'lon' in new_data.TPV and mode >= 2:
-                                latitude = float(new_data.TPV['lat'])
-                                longitude = float(new_data.TPV['lon'])
-                                altitude = float(new_data.TPV.get('alt', 0.0))
-                                satellites = len(new_data.SKY.get('satellites', [])) if hasattr(new_data, 'SKY') else 0
-                                # Update altitude from GPS
-                                self.altitude = altitude
-                                
-                                current_gps = GPS(
-                                    latitude=round(latitude, 6),
-                                    longitude=round(longitude, 6),
-                                    altitude=round(altitude, 2),
-                                    satellites=satellites,
-                                )
-                                self.last_known_gps = current_gps
-                                return current_gps
-                            elif mode == 1:
-                                logger.info("Waiting for GPS Fix...")
+                    gpsd.connect()
+                    self.gpsd_connected = True
+                except Exception:
+                    pass
+
+            if self.gpsd_connected:
+                try:
+                    packet = gpsd.get_current()
+                    if getattr(packet, 'mode', 0) >= 2:
+                        latitude = getattr(packet, 'lat', 0.0)
+                        longitude = getattr(packet, 'lon', 0.0)
+                        altitude = getattr(packet, 'alt', 0.0)
+                        satellites = getattr(packet, 'sats', 0)
+                        if altitude:
+                            self.altitude = altitude
+                        
+                        current_gps = GPS(
+                            latitude=round(latitude, 6),
+                            longitude=round(longitude, 6),
+                            altitude=round(altitude, 2),
+                            satellites=satellites,
+                        )
+                        self.last_known_gps = current_gps
+                        return current_gps
+                    else:
+                        logger.info("Waiting for GPS Fix (gpsd)...")
                 except Exception as e:
-                    logger.warning(f"Failed to read GPS: {e}")
+                    if "NoFixError" not in str(type(e)):
+                        logger.warning(f"Failed to read from gpsd: {e}")
+            else:
+                # Fallback: Read directly from Sixfab NMEA port
+                direct_gps = self._read_sixfab_nmea()
+                if direct_gps:
+                    self.altitude = direct_gps.altitude
+                    self.last_known_gps = direct_gps
+                    return direct_gps
+                else:
+                    logger.info("Waiting for GPS Fix (NMEA fallback)...")
             
             if self.last_known_gps:
                 return self.last_known_gps
             
-            logger.info("Waiting for GPS Fix (No data yet)...")
             return GPS(latitude=0.0, longitude=0.0, altitude=0.0, satellites=0)
         
         # Mock GPS: slight drift from launch point (assuming somewhere over Madrid, Spain)
@@ -819,6 +868,10 @@ class FlightComputer:
         print("Eclipse Balloon Flight Computer Starting")
         print("=" * 70)
         print()
+        
+        # Initial hardware setup
+        self.hardware_manager.wake_modem()
+        self.hardware_manager.manage_network()
 
         start_time = time.time()
         iteration = 0
@@ -843,7 +896,7 @@ class FlightComputer:
                 if phase != last_phase:
                     logger.info(f"Phase transition: {last_phase} -> {phase.value}")
                     
-                    # GROUND phase setup
+                    # GROUND phase setup (also handled at startup)
                     if phase == FlightPhase.GROUND:
                         self.hardware_manager.wake_modem()
                         self.hardware_manager.manage_network()
