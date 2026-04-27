@@ -623,7 +623,7 @@ class HardwareManager:
             subprocess.run(["pinctrl", "set", "22", "op", "dl"], check=False)
             
             logger.info("Sending AT+QGPS=1 to power on GPS engine...")
-            subprocess.run("echo -e 'AT+QGPS=1\\r' > /dev/ttyUSB2", shell=True, check=False)
+            subprocess.run("sudo sh -c \"echo -e 'AT+QGPS=1\\r' > /dev/ttyUSB2\"", shell=True, check=False)
         except Exception as e:
             logger.error(f"Failed to wake modem: {e}")
 
@@ -640,7 +640,7 @@ class HardwareManager:
         try:
             if self.no_wifi:
                 logger.info("Disabling default route on wlan0 to force cellular testing...")
-                subprocess.run(["sudo", "ip", "route", "del", "default", "dev", "wlan0"], check=False)
+                subprocess.run(["sudo", "ip", "route", "del", "default", "dev", "wlan0"], stderr=subprocess.DEVNULL, check=False)
 
             if os.path.exists("/sys/class/net/usb0"):
                 logger.info("Found usb0 interface, configuring network...")
@@ -653,7 +653,7 @@ class HardwareManager:
                 logger.info(f"usb0 IP Configuration:\\n{usb0_addr.stdout}")
                 routes = subprocess.run(["ip", "route"], capture_output=True, text=True)
                 logger.info(f"Routing Table:\\n{routes.stdout}")
-                mmcli = subprocess.run(["mmcli", "-m", "any"], capture_output=True, text=True)
+                mmcli = subprocess.run(["sudo", "mmcli", "-m", "any"], capture_output=True, text=True)
                 logger.info(f"Modem Status:\\n{mmcli.stdout}")
                 lsusb = subprocess.run(["lsusb"], capture_output=True, text=True)
                 logger.info(f"USB Devices:\\n{lsusb.stdout}")
@@ -663,7 +663,7 @@ class HardwareManager:
                 logger.info("--- Cellular Debugging Info (Missing usb0) ---")
                 lsusb = subprocess.run(["lsusb"], capture_output=True, text=True)
                 logger.info(f"USB Devices:\\n{lsusb.stdout}")
-                mmcli = subprocess.run(["mmcli", "-m", "any"], capture_output=True, text=True)
+                mmcli = subprocess.run(["sudo", "mmcli", "-m", "any"], capture_output=True, text=True)
                 logger.info(f"Modem Status:\\n{mmcli.stdout}")
                 logger.info("----------------------------------------------")
         except Exception as e:
@@ -733,7 +733,7 @@ class NetworkHealer(threading.Thread):
         # Level 2: mmcli soft reset (dynamic targeting)
         if self.consecutive_failures >= 2:
             logger.warning("Level 2 Healing: Soft resetting modem via mmcli -m any")
-            subprocess.run(["mmcli", "-m", "any", "--reset"], check=False)
+            subprocess.run(["sudo", "mmcli", "-m", "any", "--reset"], check=False)
             time.sleep(10)  # Give modem time to restart
             self.hardware.manage_network()
             if self.check_connection():
