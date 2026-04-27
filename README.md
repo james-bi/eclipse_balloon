@@ -4,6 +4,13 @@ Welcome to the brains of the Eclipse Balloon project! This is the actual code th
 
 Whether you're a Scout working on your STEM badges or an aspiring rocket scientist, this guide will show you exactly how our spacecraft thinks and operates.
 
+### Prerequisites (Raspberry Pi Setup)
+Before running the flight computer on the Raspberry Pi, ensure you have the necessary system packages installed to interact with the hardware and modem:
+```bash
+sudo apt-get update
+sudo apt-get install -y gpsd gpsd-clients modemmanager iproute2 usbutils
+```
+
 ### 🚀 Quick Start
 When starting the flight computer, you can give your balloon a custom name (which overrides the `BALLOON_ID` in your `.env` file) by passing the `--name` argument:
 ```bash

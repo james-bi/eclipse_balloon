@@ -96,11 +96,13 @@ class SensorManager:
 
         # Mock temperature: decreases with altitude (~6.5°C per 1000m) - since sensor not working
         self.temperature = 15.0 - (self.altitude / 1000.0) * 6.5
+        self.temperature = max(-273.15, self.temperature)
         self.temperature += random.uniform(-0.5, 0.5)
 
         # Mock pressure: decreases exponentially with altitude
         self.pressure = 1013.25 * max(0.0, 1 - self.altitude / 44330) ** 5.255
         self.pressure += random.uniform(-1, 1)
+        self.pressure = max(0.0, self.pressure)
 
         # Mock battery: slowly drains over flight (~0.1% per reading at 5s intervals)
         self.battery_level = max(0, self.battery_level - random.uniform(0, 0.1))
