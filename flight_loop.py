@@ -118,37 +118,53 @@ class SensorManager:
             battery_level=round(self.battery_level, 2),
         )
 
-    def _read_sixfab_nmea(self) -> Optional[GPS]:
-        """Fallback to directly reading NMEA from Sixfab ttyUSB1."""
-        if not os.path.exists('/dev/ttyUSB1'):
-            return None
+    def _read_quectel_gps(self) -> Optional[GPS]:
+        """Fetches and parses GPS data from the Quectel modem."""
+        print("🛰️ Checking satellite link...")
         try:
-            # Read a GGA line with timeout. GGA contains altitude, sats, and fix quality.
-            cmd = "timeout 2 cat /dev/ttyUSB1 | grep -E '\\$GPGGA|\\$GNGGA' | head -n 1"
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-            if result.returncode == 0 and result.stdout.strip():
-                line = result.stdout.strip()
-                parts = line.split(',')
-                if len(parts) >= 10 and parts[6] != '0':  # 0 means invalid fix
-                    lat_raw, lat_dir = parts[2], parts[3]
-                    lon_raw, lon_dir = parts[4], parts[5]
-                    sats, alt_raw = parts[7], parts[9]
-                    
-                    if lat_raw and lon_raw and alt_raw:
-                        lat = float(lat_raw[:2]) + float(lat_raw[2:])/60.0
-                        if lat_dir == 'S': lat = -lat
-                        
-                        lon = float(lon_raw[:3]) + float(lon_raw[3:])/60.0
-                        if lon_dir == 'W': lon = -lon
-                        
-                        return GPS(
-                            latitude=round(lat, 6),
-                            longitude=round(lon, 6),
-                            altitude=round(float(alt_raw), 2),
-                            satellites=int(sats)
-                        )
+            # Requesting location data (Format 2)
+            # Output format: <UTC>,<lat>,<lon>,<hdop>,<alt>,<fix>,<cog>,<spkm>,<spkn>,<date>,<nsat>
+            cmd = "echo 'AT+QGPSLOC=2' | sudo socat - /dev/ttyUSB2,crnl"
+            raw_output = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, timeout=5).decode().strip()
+
+            if "+QGPSLOC:" in raw_output:
+                # Clean the string to get just the numbers
+                data_string = raw_output.split("+QGPSLOC: ")[1]
+                parts = data_string.split(",")
+                
+                lat = float(parts[1])
+                lon = float(parts[2])
+                alt = float(parts[4])
+                sats = int(parts[10])
+                
+                print(" ✅ FIX ACQUIRED!")
+                print(f" 📍 Position: {lat}, {lon}")
+                print(f" 🏔️ Altitude: {alt} meters MSL")
+                print(f" 📡 Satellites in view: {sats}")
+                
+                return GPS(
+                    latitude=round(lat, 6),
+                    longitude=round(lon, 6),
+                    altitude=round(alt, 2),
+                    satellites=sats
+                )
+
+            elif "516" in raw_output:
+                print(" ❌ STATUS: NO FIX.")
+                print("    Reason: The antenna can't see enough satellites yet.")
+                print("    Action: Move the sticker antenna outside or away from buildings.")
+                
+            elif "505" in raw_output:
+                print(" ❌ STATUS: GPS ENGINE OFF.")
+                print("    Action: Run the 'initialize_flight_gps' script first!")
+                
+            else:
+                print(f" ❓ UNKNOWN ERROR: {raw_output}")
+
         except Exception as e:
-            logger.debug(f"Direct NMEA read failed: {e}")
+            print(f" 🛠️ HARDWARE ERROR: Could not talk to the modem. ({str(e)})")
+            print("    Check: Is the Sixfab HAT securely attached?")
+
         return None
 
     def get_gps(self) -> GPS:
@@ -192,14 +208,14 @@ class SensorManager:
                     if "NoFixError" not in str(type(e)):
                         logger.warning(f"Failed to read from gpsd: {e}")
             else:
-                # Fallback: Read directly from Sixfab NMEA port
-                direct_gps = self._read_sixfab_nmea()
+                # Fallback: Read directly from Quectel modem
+                direct_gps = self._read_quectel_gps()
                 if direct_gps:
                     self.altitude = direct_gps.altitude
                     self.last_known_gps = direct_gps
                     return direct_gps
                 else:
-                    logger.info("Waiting for GPS Fix (NMEA fallback)...")
+                    logger.info("Waiting for GPS Fix (Quectel fallback)...")
             
             if self.last_known_gps:
                 return self.last_known_gps
@@ -412,14 +428,35 @@ class TelemetryDispatcher:
             return False
 
     def disable_cellular(self) -> None:
-        """Disable cellular transmission (mock)."""
+        """Disable cellular transmission and network radios to save battery."""
         self.is_cellular_enabled = False
-        logger.info("Cellular disabled")
+        logger.info("💤 SLEEPING (Power Save) NETWORK RADIOS")
+        try:
+            logger.info("Turning Wi-Fi off...")
+            subprocess.run("sudo nmcli radio wifi off", shell=True, check=True)
+            logger.info("Turning Cellular off...")
+            subprocess.run("sudo nmcli radio wwan off", shell=True, check=True)
+            logger.info("Radios disabled. Battery consumption reduced.")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to toggle radios: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error: {str(e)}")
 
     def enable_cellular(self) -> None:
-        """Enable cellular transmission (mock)."""
+        """Enable cellular transmission and network radios."""
         self.is_cellular_enabled = True
-        logger.info("Cellular enabled")
+        logger.info("🚀 ACTIVATING NETWORK RADIOS")
+        try:
+            logger.info("Turning Wi-Fi on...")
+            subprocess.run("sudo nmcli radio wifi on", shell=True, check=True)
+            logger.info("Turning Cellular on...")
+            subprocess.run("sudo nmcli radio wwan on", shell=True, check=True)
+            logger.info("Radios enabled. Waiting for reconnect...")
+            time.sleep(5)
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to toggle radios: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error: {str(e)}")
 
 
 class SafetyManager:
@@ -600,221 +637,19 @@ class SafetyManager:
         logger.critical("BALLOON LANDED AND SHUT DOWN SUCCESSFULLY")
 
 
-class HardwareManager:
-    """Manages hardware-specific power and modems."""
-
-    def __init__(self, no_wifi: bool = False):
-        self.no_wifi = no_wifi
-
-    def power_save(self) -> None:
-        """Run tvservice -o to disable HDMI and save battery."""
-        try:
-            logger.info("Disabling HDMI to save power...")
-            subprocess.run(["tvservice", "-o"], check=False)
-        except Exception as e:
-            logger.error(f"Failed to disable HDMI: {e}")
-
-    def wake_modem(self) -> None:
-        """Pulse GPIO 22 using pinctrl to wake the Sixfab HAT."""
-        try:
-            logger.info("Waking up modem on GPIO 22...")
-            subprocess.run(["pinctrl", "set", "22", "op", "dh"], check=False)
-            time.sleep(2)
-            subprocess.run(["pinctrl", "set", "22", "op", "dl"], check=False)
-            
-            logger.info("Sending AT+QGPS=1 to power on GPS engine...")
-            subprocess.run("sudo sh -c \"echo -e 'AT+QGPS=1\\r' > /dev/ttyUSB2\"", shell=True, check=False)
-        except Exception as e:
-            logger.error(f"Failed to wake modem: {e}")
-
-    def shutdown_system(self) -> None:
-        """Run sudo halt -p for the final fire-safety shutdown."""
-        try:
-            logger.critical("Executing system halt command (sudo halt -p)...")
-            subprocess.run(["sudo", "halt", "-p"], check=False)
-        except Exception as e:
-            logger.error(f"Failed to execute shutdown: {e}")
-
-    def manage_network(self) -> None:
-        """Configure usb0 interface and routing."""
-        try:
-            if self.no_wifi:
-                logger.info("Disabling default route on wlan0 to force cellular testing...")
-                subprocess.run(["sudo", "ip", "route", "del", "default", "dev", "wlan0"], stderr=subprocess.DEVNULL, check=False)
-
-            if os.path.exists("/sys/class/net/usb0"):
-                logger.info("Found usb0 interface, configuring network...")
-                subprocess.run(["sudo", "ip", "link", "set", "usb0", "up"], check=False)
-                subprocess.run(["sudo", "dhclient", "usb0"], check=False)
-                subprocess.run(["sudo", "ip", "route", "add", "default", "via", "192.168.225.1", "dev", "usb0", "metric", "800"], check=False)
-                
-                logger.info("--- Cellular Debugging Info ---")
-                usb0_addr = subprocess.run(["ip", "addr", "show", "usb0"], capture_output=True, text=True)
-                logger.info(f"usb0 IP Configuration:\\n{usb0_addr.stdout}")
-                routes = subprocess.run(["ip", "route"], capture_output=True, text=True)
-                logger.info(f"Routing Table:\\n{routes.stdout}")
-                mmcli = subprocess.run(["sudo", "mmcli", "-m", "any"], capture_output=True, text=True)
-                logger.info(f"Modem Status:\\n{mmcli.stdout}")
-                lsusb = subprocess.run(["lsusb"], capture_output=True, text=True)
-                logger.info(f"USB Devices:\\n{lsusb.stdout}")
-                logger.info("-------------------------------")
-            else:
-                logger.warning("usb0 interface not found, skipping network configuration.")
-                logger.info("--- Cellular Debugging Info (Missing usb0) ---")
-                lsusb = subprocess.run(["lsusb"], capture_output=True, text=True)
-                logger.info(f"USB Devices:\\n{lsusb.stdout}")
-                mmcli = subprocess.run(["sudo", "mmcli", "-m", "any"], capture_output=True, text=True)
-                logger.info(f"Modem Status:\\n{mmcli.stdout}")
-                logger.info("----------------------------------------------")
-        except Exception as e:
-            logger.error(f"Failed to manage network: {e}")
-
-
-class NetworkHealer(threading.Thread):
-    """Background thread to monitor and heal cellular connection."""
-
-    def __init__(self, hardware_manager: HardwareManager, sensor_manager: SensorManager):
-        super().__init__(daemon=True)
-        self.hardware = hardware_manager
-        self.sensors = sensor_manager
-        self.running = True
-        self.healing_paused = False
-        self.check_interval = 10  # seconds
-        self.consecutive_failures = 0
-
-    def check_connection(self) -> bool:
-        """Ping 8.8.8.8 to verify connectivity."""
-        try:
-            # -c 1 = 1 packet, -W 5 = 5 sec timeout
-            result = subprocess.run(["ping", "-c", "1", "-W", "5", "8.8.8.8"], capture_output=True)
-            return result.returncode == 0
-        except Exception:
-            return False
-
-    def get_public_ip(self) -> str:
-        try:
-            result = subprocess.run(["curl", "-s", "--connect-timeout", "5", "https://api.ipify.org"], capture_output=True, text=True)
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
-        except Exception:
-            pass
-        return "Unknown"
-
-    def get_tailscale_ip(self) -> str:
-        try:
-            result = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=5)
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except Exception:
-            pass
-        return "Unknown"
-
-    def notify_webhook(self, public_ip: str, tailscale_ip: str) -> None:
-        webhook_url = os.getenv("WEBHOOK_URL")
-        if not webhook_url:
-            return
-        try:
-            payload = {
-                "text": f"🚀 Eclipse Balloon Connection Re-established!\\n**Public IP:** {public_ip}\\n**Tailscale IP:** {tailscale_ip}"
-            }
-            requests.post(webhook_url, json=payload, timeout=5)
-            logger.info("Sent webhook notification.")
-        except Exception as e:
-            logger.error(f"Failed to send webhook: {e}")
-
-    def heal_connection(self) -> bool:
-        logger.warning(f"Connection lost. Failure {self.consecutive_failures}. Attempting to heal...")
-        
-        # Level 1: Manage network (ip link, dhclient, routes)
-        self.hardware.manage_network()
-        if self.check_connection():
-            return True
-            
-        # Level 2: mmcli soft reset (dynamic targeting)
-        if self.consecutive_failures >= 2:
-            logger.warning("Level 2 Healing: Soft resetting modem via mmcli -m any")
-            subprocess.run(["sudo", "mmcli", "-m", "any", "--reset"], check=False)
-            time.sleep(10)  # Give modem time to restart
-            self.hardware.manage_network()
-            if self.check_connection():
-                return True
-                
-        # Level 3: Physical GPIO power cycle
-        if self.consecutive_failures >= 4:
-            logger.critical("Level 3 Healing: Hard power cycle via GPIO 22")
-            self.hardware.wake_modem()  # Pulses GPIO 22
-            time.sleep(15)  # Give modem time to boot
-            self.hardware.manage_network()
-            if self.check_connection():
-                return True
-                
-        return False
-
-    def run(self) -> None:
-        was_connected = True
-        
-        while self.running:
-            try:
-                # Use current altitude
-                altitude = self.sensors.altitude
-                
-                # Altitude-Aware Connectivity
-                if not self.healing_paused and altitude > 15000:
-                    logger.info("Altitude > 15000m. Pausing connection healing to save battery.")
-                    self.healing_paused = True
-                elif self.healing_paused and altitude < 12000:
-                    logger.info("Altitude < 12000m. Resuming connection healing.")
-                    self.healing_paused = False
-                    
-                if self.healing_paused:
-                    time.sleep(self.check_interval)
-                    continue
-                    
-                # Low-Level Pings
-                is_connected = self.check_connection()
-                
-                if is_connected:
-                    if not was_connected:
-                        logger.info("Connection re-established!")
-                        public_ip = self.get_public_ip()
-                        tailscale_ip = self.get_tailscale_ip()
-                        self.notify_webhook(public_ip, tailscale_ip)
-                    self.consecutive_failures = 0
-                    was_connected = True
-                else:
-                    was_connected = False
-                    self.consecutive_failures += 1
-                    healed = self.heal_connection()
-                    if healed:
-                        logger.info("Connection successfully healed!")
-                        public_ip = self.get_public_ip()
-                        tailscale_ip = self.get_tailscale_ip()
-                        self.notify_webhook(public_ip, tailscale_ip)
-                        self.consecutive_failures = 0
-                        was_connected = True
-
-            except Exception as e:
-                logger.error(f"Error in NetworkHealer: {e}")
-                
-            time.sleep(self.check_interval)
-
-
 class FlightComputer:
     """Main flight computer logic."""
 
-    def __init__(self, descent_threshold: int = 3, no_wifi: bool = False):
+    def __init__(self, descent_threshold: int = 3):
         """
         Initialize flight computer.
         
         Args:
             descent_threshold: Number of consecutive readings to trigger descent phase.
-            no_wifi: Stop using WiFi for internet to force cellular connection testing.
         """
         self.sensor_manager = SensorManager()
         self.dispatcher = TelemetryDispatcher()
         self.safety_manager = SafetyManager(self.dispatcher)
-        self.hardware_manager = HardwareManager(no_wifi=no_wifi)
-        self.network_healer = NetworkHealer(self.hardware_manager, self.sensor_manager)
         self.current_phase = FlightPhase.GROUND
         self.altitude_history = deque(maxlen=descent_threshold)
         self.descent_threshold = descent_threshold
@@ -870,17 +705,10 @@ class FlightComputer:
         print("Eclipse Balloon Flight Computer Starting")
         print("=" * 70)
         print()
-        
-        # Initial hardware setup
-        self.hardware_manager.wake_modem()
-        self.hardware_manager.manage_network()
 
         start_time = time.time()
         iteration = 0
         last_phase = None
-        last_network_manage_time = 0
-
-        self.network_healer.start()
 
         try:
             while time.time() - start_time < duration:
@@ -897,11 +725,6 @@ class FlightComputer:
                 # Handle phase transitions
                 if phase != last_phase:
                     logger.info(f"Phase transition: {last_phase} -> {phase.value}")
-                    
-                    # GROUND phase setup (also handled at startup)
-                    if phase == FlightPhase.GROUND:
-                        self.hardware_manager.wake_modem()
-                        self.hardware_manager.manage_network()
                     
                     # NEAR_SPACE: disable cellular and begin logging
                     if phase == FlightPhase.NEAR_SPACE:
@@ -929,11 +752,6 @@ class FlightComputer:
                 elif phase in (FlightPhase.DESCENT, FlightPhase.LANDED):
                     # Attempt to send in real-time
                     self.dispatcher.send_data(telemetry, gps)
-                    
-                    # Manage network every 60 seconds to grab a tower IP
-                    if current_time - last_network_manage_time >= 60:
-                        self.hardware_manager.manage_network()
-                        last_network_manage_time = current_time
 
                 # Safety check: Monitor for landing
                 if phase in (FlightPhase.DESCENT, FlightPhase.LANDED):
@@ -982,19 +800,88 @@ class FlightComputer:
             print("\n" + "=" * 70)
             print("Flight loop interrupted by user")
             print("=" * 70)
-        finally:
-            self.network_healer.running = False
-            self.network_healer.join(timeout=2)
+
+
+def run_modem_cmd(at_command, timeout=5):
+    """Sends an AT command and returns the output."""
+    try:
+        # We use socat because it handles the serial handshake reliably for us
+        cmd = f"echo '{at_command}' | sudo socat - /dev/ttyUSB2,crnl"
+        result = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, timeout=timeout)
+        return result.decode().strip()
+    except subprocess.CalledProcessError as e:
+        return f"ERROR: {e.output.decode()}"
+    except Exception as e:
+        return f"SYSTEM FAILURE: {str(e)}"
+
+def initialize_flight_gps():
+    print("--- 🛰️ SCOUT BALLOON GPS INITIALIZATION ---")
+    
+    # 1. Wait for Network Manager
+    print("[1/5] Checking for Internet/Cellular connection...")
+    connected = False
+    for attempt in range(1, 11):
+        status = subprocess.getoutput("nmcli -t -f STATE g")
+        if status == "connected":
+            print(" ✅ Internet Connected! Time sync is now possible.")
+            connected = True
+            break
+        else:
+            print(f" ⏳ Waiting for Network Manager (Attempt {attempt}/10)...")
+            time.sleep(5)
+            
+    if not connected:
+        print(" ❌ WARNING: No network found. GPS will lack 'Assisted' data and take longer to lock.")
+
+    # 2. Check for Modem hardware
+    if not os.path.exists("/dev/ttyUSB2"):
+        print("[2/5] Modem not found! Attempting hardware wake-up (GPIO 22)...")
+        subprocess.run("sudo pinctrl set 22 op && sudo pinctrl set 22 dh", shell=True)
+        time.sleep(2)
+        subprocess.run("sudo pinctrl set 22 dl", shell=True)
+        print(" ⏳ Waiting 15 seconds for modem to boot...")
+        time.sleep(15)
+
+    # 3. Start GPS Engine
+    print("[3/5] Powering up GPS hardware...")
+    response = run_modem_cmd("AT+QGPS=1")
+    if "OK" in response or "504" in response: # 504 means already on
+        print(" ✅ GPS Engine Active.")
+    else:
+        print(f" ❌ FAILED to start GPS: {response}")
+        return False
+
+    # 4. Sync Time and Assisted GPS (The 'Speed Boost')
+    print("[4/5] Syncing satellite almanac and flight time...")
+    run_modem_cmd('AT+QNTP=1,"pool.ntp.org"')
+    run_modem_cmd('AT+QGPSXTRA=1')
+    run_modem_cmd('AT+QGPSXTRADATA=1')
+    print(" ✅ Time & Almanac data injected.")
+
+    # 5. Set Airborne Mode (The 'Safety Switch')
+    print("[5/5] Configuring Flight Mode (Airborne < 1g)...")
+    response = run_modem_cmd('AT+QGPSCFG="dynamicmodel",6')
+    if "OK" in response:
+        print(" ✅ Airborne Mode set! GPS will not lock out at high altitude.")
+    else:
+        print(f" ❌ WARNING: Could not set Airborne mode. Accuracy may drop above 12km.")
+
+    print("\\n--- 🎈 INITIALIZATION COMPLETE: READY FOR LAUNCH ---")
+    print("Point the sticker antenna at the sky and check signal with 'cat /dev/ttyUSB1'")
+    return True
 
 
 if __name__ == "__main__":
+    if not initialize_flight_gps():
+        print("Critical failure during setup. Check connections and try again.")
+        sys.exit(1)
+
     parser = argparse.ArgumentParser(description="Eclipse Balloon Flight Computer")
     parser.add_argument("--name", type=str, help="Override the balloon ID/name from .env")
-    parser.add_argument("--no-wifi", action="store_true", help="Stop using WiFi for internet (removes wlan0 default route)")
     args = parser.parse_args()
 
     if args.name:
         os.environ["BALLOON_ID"] = args.name
 
-    flight_computer = FlightComputer(no_wifi=args.no_wifi)
+    flight_computer = FlightComputer()
     flight_computer.run()
