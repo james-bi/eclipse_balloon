@@ -124,8 +124,7 @@ class SensorManager:
         try:
             # Requesting location data (Format 2)
             # Output format: <UTC>,<lat>,<lon>,<hdop>,<alt>,<fix>,<cog>,<spkm>,<spkn>,<date>,<nsat>
-            cmd = "echo 'AT+QGPSLOC=2' | sudo socat - /dev/ttyUSB2,crnl"
-            raw_output = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, timeout=5).decode().strip()
+            raw_output = run_modem_cmd('AT+QGPSLOC=2')
 
             if "+QGPSLOC:" in raw_output:
                 # Clean the string to get just the numbers
@@ -149,7 +148,7 @@ class SensorManager:
                     satellites=sats
                 )
 
-            elif "516" in raw_output:
+            elif "516" in raw_output or ("ERROR" in raw_output and "505" not in raw_output):
                 print(" ❌ STATUS: NO FIX.")
                 print("    Reason: The antenna can't see enough satellites yet.")
                 print("    Action: Move the sticker antenna outside or away from buildings.")
@@ -805,12 +804,13 @@ class FlightComputer:
 def run_modem_cmd(at_command, timeout=5):
     """Sends an AT command and returns the output."""
     try:
-        # We use socat because it handles the serial handshake reliably for us
-        cmd = f"echo '{at_command}' | sudo socat - /dev/ttyUSB2,crnl"
-        result = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, timeout=timeout)
+        # We use socat because it handles the serial handshake reliably for us.
+        # Use 'timeout' in the shell command to properly kill socat if it hangs.
+        cmd = f"echo '{at_command}' | sudo timeout {timeout} socat -t 1 - /dev/ttyUSB2,crnl"
+        result = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT)
         return result.decode().strip()
     except subprocess.CalledProcessError as e:
-        return f"ERROR: {e.output.decode()}"
+        return f"ERROR: {e.output.decode() if e.output else 'Timeout'}"
     except Exception as e:
         return f"SYSTEM FAILURE: {str(e)}"
 
@@ -844,6 +844,8 @@ def initialize_flight_gps():
 
     # 3. Start GPS Engine
     print("[3/5] Powering up GPS hardware...")
+    run_modem_cmd("ATE0")       # Turn off local echo
+    run_modem_cmd("AT+CMEE=1")  # Enable numeric error codes
     response = run_modem_cmd("AT+QGPS=1")
     if "OK" in response or "504" in response: # 504 means already on
         print(" ✅ GPS Engine Active.")
