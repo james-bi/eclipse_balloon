@@ -134,7 +134,8 @@ class SensorManager:
                 lat = float(parts[1])
                 lon = float(parts[2])
                 alt = float(parts[4])
-                sats = int(parts[10])
+                sats_str = parts[10].replace('OK', '').strip()
+                sats = int(sats_str)
                 
                 print(" ✅ FIX ACQUIRED!")
                 print(f" 📍 Position: {lat}, {lon}")
