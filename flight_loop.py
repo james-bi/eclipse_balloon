@@ -266,13 +266,14 @@ class TelemetryDispatcher:
             return path
         return urllib.parse.urljoin(self.api_url.rstrip('/') + '/', path.lstrip('/'))
 
-    def send_data(self, telemetry: Telemetry, gps: GPS) -> bool:
+    def send_data(self, telemetry: Telemetry, gps: GPS, flight_phase: FlightPhase = FlightPhase.GROUND) -> bool:
         """
         Send telemetry data to API via HTTP POST.
         
         Args:
             telemetry: Telemetry object with sensor data.
             gps: GPS object with location data.
+            flight_phase: Current flight phase.
             
         Returns:
             True if successful, False otherwise.
@@ -289,6 +290,7 @@ class TelemetryDispatcher:
                 "altitude": telemetry.altitude,
                 "temperature": telemetry.temperature,
                 "battery_level": telemetry.battery_level,
+                "flight_phase": flight_phase.value,
             }
 
             url = self._resolve_url("/api/telemetry/receive/")
@@ -326,13 +328,14 @@ class TelemetryDispatcher:
             logger.error(f"Failed to send telemetry: {e}")
             return False
 
-    def save_to_log(self, telemetry: Telemetry, gps: GPS) -> None:
+    def save_to_log(self, telemetry: Telemetry, gps: GPS, flight_phase: FlightPhase = FlightPhase.GROUND) -> None:
         """
         Save telemetry data to local JSON log file.
         
         Args:
             telemetry: Telemetry object with sensor data.
             gps: GPS object with location data.
+            flight_phase: Current flight phase.
         """
         payload = {
             "timestamp": time.time(),
@@ -342,6 +345,7 @@ class TelemetryDispatcher:
             "altitude": telemetry.altitude,
             "temperature": telemetry.temperature,
             "battery_level": telemetry.battery_level,
+            "flight_phase": flight_phase.value,
         }
 
         try:
@@ -559,6 +563,7 @@ class SafetyManager:
                 "altitude": 0.0,  # Landed
                 "temperature": 0.0,
                 "battery_level": 0.0,
+                "flight_phase": FlightPhase.LANDED.value,
                 "event_type": "LANDING",
             }
 
@@ -742,16 +747,16 @@ class FlightComputer:
                 if phase in (FlightPhase.ASCENT_LOW, FlightPhase.ASCENT_HIGH):
                     # Send mocked telemetry every loop interval (every 5 seconds)
                     if current_time - self.dispatcher.last_send_time >= self.dispatcher.send_interval:
-                        self.dispatcher.send_data(telemetry, gps)
+                        self.dispatcher.send_data(telemetry, gps, phase)
                         self.dispatcher.last_send_time = current_time
 
                 elif phase == FlightPhase.NEAR_SPACE:
                     # Save to local log (offline mode)
-                    self.dispatcher.save_to_log(telemetry, gps)
+                    self.dispatcher.save_to_log(telemetry, gps, phase)
 
                 elif phase in (FlightPhase.DESCENT, FlightPhase.LANDED):
                     # Attempt to send in real-time
-                    self.dispatcher.send_data(telemetry, gps)
+                    self.dispatcher.send_data(telemetry, gps, phase)
 
                 # Safety check: Monitor for landing
                 if phase in (FlightPhase.DESCENT, FlightPhase.LANDED):
