@@ -10,6 +10,7 @@ import logging
 import urllib.parse
 import subprocess
 import threading
+import sys
 from enum import Enum
 from collections import deque
 from dataclasses import dataclass, asdict
