@@ -5,6 +5,7 @@ import time
 import random
 import json
 import os
+import io
 import argparse
 import logging
 import urllib.parse
@@ -711,9 +712,14 @@ class CameraManager:
         if picamera_available:
             try:
                 self.camera = Picamera2()
-                self.camera.configure(self.camera.create_still_configuration())
+                # Configure for JPEG still image capture
+                config = self.camera.create_still_configuration(
+                    main={"format": "RGB888", "size": (1920, 1080)},
+                    raw={"size": (4608, 2592)}
+                )
+                self.camera.configure(config)
                 self.camera.start()
-                logger.info("Camera initialized successfully")
+                logger.info("Camera initialized successfully (JPEG mode)")
             except Exception as e:
                 logger.error(f"Failed to initialize camera: {e}")
                 self.camera = None
@@ -747,28 +753,48 @@ class CameraManager:
         Returns:
             Filename of captured photo, or None if failed.
         """
-        if not self.camera and not picamera_available:
-            # Mock photo for testing
-            timestamp = int(time.time())
-            filename = f"{timestamp}.jpg"
-            filepath = os.path.join(self.flight_folder, filename)
-            # Create a dummy file
-            with open(filepath, 'w') as f:
-                f.write("mock photo")
-            logger.info(f"Mock photo captured: {filename}")
-            return filename
+        timestamp = int(time.time())
+        filename = f"{timestamp}.jpg"
+        filepath = os.path.join(self.flight_folder, filename)
         
         if not self.camera:
-            logger.error("Camera not initialized")
-            return None
+            if not picamera_available:
+                # Create a valid JPEG mock file with proper SOI and EOI markers
+                # SOI (Start of Image): 0xFF 0xD8
+                # EOI (End of Image): 0xFF 0xD9
+                jpeg_header = bytes([0xFF, 0xD8])  # JPEG SOI marker
+                jpeg_trailer = bytes([0xFF, 0xD9])  # JPEG EOI marker
+                
+                # Write minimal valid JPEG structure
+                try:
+                    with open(filepath, 'wb') as f:
+                        f.write(jpeg_header)
+                        # Add minimal APP0 segment (JFIF header)
+                        app0 = bytes([0xFF, 0xE0])  # APP0 marker
+                        app0 += bytes([0x00, 0x10])  # Length
+                        app0 += b'JFIF\x00'  # Identifier
+                        app0 += bytes([0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00])
+                        f.write(app0)
+                        f.write(jpeg_trailer)
+                    logger.info(f"Mock photo captured: {filename}")
+                    return filename
+                except Exception as e:
+                    logger.error(f"Failed to create mock photo: {e}")
+                    return None
+            else:
+                logger.error("Camera not initialized")
+                return None
         
         try:
-            timestamp = int(time.time())
-            filename = f"{timestamp}.jpg"
-            filepath = os.path.join(self.flight_folder, filename)
+            # Capture to BytesIO stream
+            stream = io.BytesIO()
+            self.camera.capture_file(stream, format='jpeg')
+            stream.seek(0)  # Reset to start before saving
             
-            # Capture photo
-            self.camera.capture_file(filepath)
+            # Write stream to file
+            with open(filepath, 'wb') as f:
+                f.write(stream.getvalue())
+            
             logger.info(f"Photo captured: {filename}")
             return filename
         except Exception as e:
