@@ -881,13 +881,18 @@ def initialize_flight_gps():
 
 
 if __name__ == "__main__":
-    if not initialize_flight_gps():
-        print("Critical failure during setup. Check connections and try again.")
-        sys.exit(1)
-
     parser = argparse.ArgumentParser(description="Eclipse Balloon Flight Computer")
     parser.add_argument("--name", type=str, help="Override the balloon ID/name from .env")
+    parser.add_argument("--mock", action="store_true", help="Run with mock sensor data and skip hardware initialization.")
     args = parser.parse_args()
+
+    if not args.mock:
+        if not initialize_flight_gps():
+            print("Critical failure during setup. Check connections and try again.")
+            sys.exit(1)
+    else:
+        os.environ["USE_REAL_GPS"] = "false"
+        print("--- 🚀 RUNNING IN MOCK MODE - NO HARDWARE REQUIRED ---")
 
     if args.name:
         os.environ["BALLOON_ID"] = args.name
