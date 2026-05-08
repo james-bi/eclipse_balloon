@@ -715,18 +715,26 @@ class FlightComputer:
         start_time = time.time()
         iteration = 0
         last_phase = None
+        is_mock_flight = not self.sensor_manager.use_real_gps
 
         try:
             while time.time() - start_time < duration:
                 iteration += 1
                 current_time = time.time()
+                elapsed_time = current_time - start_time
 
                 # Get sensor data
                 gps = self.sensor_manager.get_gps()
                 telemetry = self.sensor_manager.get_telemetry()
 
-                # Update flight phase
-                phase = self.update_phase(telemetry.altitude)
+                # Update flight phase, with special pre-launch for mock flights
+                if is_mock_flight and elapsed_time < 60:
+                    phase = FlightPhase.GROUND
+                    # During mock pre-launch, keep altitude at 0 to prevent phase change
+                    telemetry.altitude = 0.0
+                    self.sensor_manager.altitude = 0.0 # Reset for next iteration
+                else:
+                    phase = self.update_phase(telemetry.altitude)
 
                 # Handle phase transitions
                 if phase != last_phase:
