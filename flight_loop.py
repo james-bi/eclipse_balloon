@@ -23,6 +23,14 @@ try:
 except ImportError:
     gpsd = None
 
+try:
+    from picamera2 import Picamera2
+    picamera_available = True
+except ImportError:
+    picamera_available = False
+
+import boto3
+
 # Load environment variables
 load_dotenv()
 
@@ -107,6 +115,7 @@ class SensorManager:
             self.altitude = max(0, self.altitude)  # Don't go below ground
 
         # Mock temperature: decreases with altitude (~6.5°C per 1000m) - since sensor not working
+        
         self.temperature = 15.0 - (self.altitude / 1000.0) * 6.5
         self.temperature = max(-273.15, self.temperature)
         self.temperature += random.uniform(-0.5, 0.5)
@@ -654,18 +663,246 @@ class SafetyManager:
         logger.critical("BALLOON LANDED AND SHUT DOWN SUCCESSFULLY")
 
 
+class CameraManager:
+    """Manages camera operations, photo capture, S3 uploads, and storage management."""
+
+    def __init__(self, flight_name: str, bucket_name: str, api_url: str, dispatcher: TelemetryDispatcher):
+        """
+        Initialize camera manager.
+        
+        Args:
+            flight_name: Name of the flight (from --name arg).
+            bucket_name: S3 bucket name.
+            api_url: API URL for webhooks.
+            dispatcher: TelemetryDispatcher for cellular status.
+        """
+        self.flight_name = flight_name
+        self.bucket_name = bucket_name
+        self.api_url = api_url
+        self.dispatcher = dispatcher
+        
+        if not self.bucket_name:
+            logger.warning("BUCKET_NAME not set, S3 uploads will be skipped")
+        if not self.api_url:
+            logger.warning("API_URL not set, webhooks will be skipped")
+        
+        # Create flight folder
+        self.flight_folder = f"./{flight_name}"
+        os.makedirs(self.flight_folder, exist_ok=True)
+        
+        # Phase-specific capture intervals (seconds)
+        self.capture_intervals = {
+            FlightPhase.GROUND: 5,
+            FlightPhase.ASCENT_LOW: 30,
+            FlightPhase.ASCENT_HIGH: 30,
+            FlightPhase.NEAR_SPACE: 5,
+            FlightPhase.DESCENT: 60,
+            FlightPhase.LANDED: 2,
+        }
+        
+        # Last capture times
+        self.last_capture_times = {phase: 0 for phase in FlightPhase}
+        
+        # S3 client
+        self.s3_client = boto3.client('s3')
+        
+        # Initialize camera
+        self.camera = None
+        if picamera_available:
+            try:
+                self.camera = Picamera2()
+                self.camera.configure(self.camera.create_still_configuration())
+                self.camera.start()
+                logger.info("Camera initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize camera: {e}")
+                self.camera = None
+        else:
+            logger.warning("Picamera2 not available, camera operations will be mocked")
+
+    def _get_disk_usage_percent(self) -> float:
+        """Get current disk usage percentage."""
+        stat = os.statvfs('/')
+        return (1 - stat.f_bavail / stat.f_blocks) * 100
+
+    def _delete_oldest_photos(self) -> None:
+        """Delete oldest photos in flight folder until disk usage < 75%."""
+        while self._get_disk_usage_percent() > 75:
+            try:
+                files = [f for f in os.listdir(self.flight_folder) if f.endswith('.jpg')]
+                if not files:
+                    break
+                files.sort(key=lambda x: os.path.getctime(os.path.join(self.flight_folder, x)))
+                oldest = files[0]
+                os.remove(os.path.join(self.flight_folder, oldest))
+                logger.info(f"Deleted oldest photo: {oldest}")
+            except Exception as e:
+                logger.error(f"Error deleting oldest photo: {e}")
+                break
+
+    def take_photo(self) -> Optional[str]:
+        """
+        Capture a photo and save locally.
+        
+        Returns:
+            Filename of captured photo, or None if failed.
+        """
+        if not self.camera and not picamera_available:
+            # Mock photo for testing
+            timestamp = int(time.time())
+            filename = f"{timestamp}.jpg"
+            filepath = os.path.join(self.flight_folder, filename)
+            # Create a dummy file
+            with open(filepath, 'w') as f:
+                f.write("mock photo")
+            logger.info(f"Mock photo captured: {filename}")
+            return filename
+        
+        if not self.camera:
+            logger.error("Camera not initialized")
+            return None
+        
+        try:
+            timestamp = int(time.time())
+            filename = f"{timestamp}.jpg"
+            filepath = os.path.join(self.flight_folder, filename)
+            
+            # Capture photo
+            self.camera.capture_file(filepath)
+            logger.info(f"Photo captured: {filename}")
+            return filename
+        except Exception as e:
+            logger.error(f"Failed to capture photo: {e}")
+            return None
+
+    def upload_to_s3(self, filename: str) -> Optional[str]:
+        """
+        Upload photo to S3.
+        
+        Args:
+            filename: Name of the photo file.
+            
+        Returns:
+            S3 URL if successful, None otherwise.
+        """
+        if not self.bucket_name:
+            logger.warning("BUCKET_NAME not set, skipping S3 upload")
+            return None
+        
+        filepath = os.path.join(self.flight_folder, filename)
+        s3_key = f"{self.flight_name}/{filename}"
+        
+        try:
+            self.s3_client.upload_file(filepath, self.bucket_name, s3_key)
+            s3_url = f"https://{self.bucket_name}.s3.amazonaws.com/{s3_key}"
+            logger.info(f"Uploaded to S3: {s3_url}")
+            return s3_url
+        except Exception as e:
+            logger.error(f"Failed to upload {filename} to S3: {e}")
+            return None
+
+    def send_webhook(self, filename: str, s3_url: str) -> bool:
+        """
+        Send webhook notification after successful S3 upload.
+        
+        Args:
+            filename: Photo filename.
+            s3_url: S3 URL of the photo.
+            
+        Returns:
+            True if successful, False otherwise.
+        """
+        if not self.api_url:
+            logger.warning("API_URL not set, skipping webhook")
+            return False
+        
+        try:
+            payload = {
+                "filename": filename,
+                "s3_url": s3_url,
+            }
+            url = urllib.parse.urljoin(self.api_url.rstrip('/') + '/', "api/photo/notify/")
+            response = requests.post(url, json=payload, timeout=10)
+            response.raise_for_status()
+            logger.info(f"Webhook sent for {filename}")
+            return True
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to send webhook for {filename}: {e}")
+            return False
+
+    def process_pending_uploads(self) -> None:
+        """Upload all pending photos that failed previously."""
+        if not self.dispatcher.is_cellular_enabled:
+            return
+        
+        try:
+            files = [f for f in os.listdir(self.flight_folder) if f.endswith('.jpg')]
+            for filename in files:
+                filepath = os.path.join(self.flight_folder, filename)
+                if os.path.exists(filepath):
+                    s3_url = self.upload_to_s3(filename)
+                    if s3_url:
+                        self.send_webhook(filename, s3_url)
+                        # Remove local file after successful upload
+                        os.remove(filepath)
+                        logger.info(f"Removed local file after upload: {filename}")
+        except Exception as e:
+            logger.error(f"Error processing pending uploads: {e}")
+
+    def capture_and_upload(self, phase: FlightPhase) -> None:
+        """
+        Capture photo if interval has passed, upload if possible.
+        
+        Args:
+            phase: Current flight phase.
+        """
+        current_time = time.time()
+        interval = self.capture_intervals.get(phase, 30)
+        
+        if current_time - self.last_capture_times[phase] < interval:
+            return
+        
+        # Check disk usage before capturing
+        if self._get_disk_usage_percent() > 75:
+            self._delete_oldest_photos()
+        
+        filename = self.take_photo()
+        if not filename:
+            return
+        
+        self.last_capture_times[phase] = current_time
+        
+        # Try to upload immediately if cellular enabled
+        if self.dispatcher.is_cellular_enabled:
+            s3_url = self.upload_to_s3(filename)
+            if s3_url:
+                self.send_webhook(filename, s3_url)
+                # Remove local file
+                os.remove(os.path.join(self.flight_folder, filename))
+            else:
+                logger.info(f"Upload failed, keeping {filename} for later")
+        else:
+            logger.info(f"Offline, saved {filename} locally")
+
+
 class FlightComputer:
     """Main flight computer logic."""
 
-    def __init__(self, descent_threshold: int = 3):
+    def __init__(self, flight_name: str, descent_threshold: int = 3):
         """
         Initialize flight computer.
         
         Args:
+            flight_name: Name of the flight.
             descent_threshold: Number of consecutive readings to trigger descent phase.
         """
+        self.flight_name = flight_name
+        bucket_name = os.getenv("BUCKET_NAME")
+        api_url = os.getenv("API_URL")
+        
         self.sensor_manager = SensorManager()
         self.dispatcher = TelemetryDispatcher()
+        self.camera_manager = CameraManager(flight_name, bucket_name, api_url, self.dispatcher)
         self.safety_manager = SafetyManager(self.dispatcher)
         self.current_phase = FlightPhase.GROUND
         self.altitude_history = deque(maxlen=descent_threshold)
@@ -755,6 +992,9 @@ class FlightComputer:
                 else:
                     phase = self.update_phase(telemetry.altitude)
 
+                # Capture and upload photos based on phase
+                self.camera_manager.capture_and_upload(phase)
+
                 # --- MOCK FLIGHT: Radio silence simulation ---
                 mock_radio_silence = is_mock_flight and 120 <= elapsed_time < 300
 
@@ -792,6 +1032,10 @@ class FlightComputer:
                 elif phase in (FlightPhase.DESCENT, FlightPhase.LANDED):
                     # Attempt to send in real-time
                     self.dispatcher.send_data(telemetry, gps, phase)
+                
+                # Process any pending photo uploads
+                self.camera_manager.process_pending_uploads()
+                
                 # Safety check: Monitor for landing
                 if phase in (FlightPhase.DESCENT, FlightPhase.LANDED):
                     if phase == FlightPhase.LANDED or self.safety_manager.check_landing_imminent(telemetry.altitude):
@@ -930,5 +1174,10 @@ if __name__ == "__main__":
     if args.name:
         os.environ["BALLOON_ID"] = args.name
 
-    flight_computer = FlightComputer()
+    flight_name = args.name or os.getenv("BALLOON_ID")
+    if not flight_name:
+        print("Error: Flight name not set. Use --name or set BALLOON_ID in .env")
+        sys.exit(1)
+
+    flight_computer = FlightComputer(flight_name)
     flight_computer.run()

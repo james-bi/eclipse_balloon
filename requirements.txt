@@ -2,4 +2,4 @@ requests
 boto3
 python-dotenv
 gpsd-py3
-# picamera  # Uncomment on Raspberry Pi hardware
+picamera2  # For Raspberry Pi camera
