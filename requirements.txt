@@ -3,3 +3,4 @@ boto3
 python-dotenv
 gpsd-py3
 picamera2  # For Raspberry Pi camera
+Pillow  # For fallback image generation
