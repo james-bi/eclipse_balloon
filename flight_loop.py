@@ -893,13 +893,32 @@ class CameraManager:
                 "s3_url": s3_url,
             }
             url = urllib.parse.urljoin(self.api_url.rstrip('/') + '/', "api/photo/notify/")
-            logger.debug(f"Sending image info webhook. JSON token: {json.dumps(payload)}")
-            response = requests.post(url, json=payload, timeout=10)
+            
+            # Detailed request logging for server agent debugging
+            headers = {"Content-Type": "application/json"}
+            payload_json = json.dumps(payload)
+            logger.info("=" * 80)
+            logger.info("IMAGE WEBHOOK REQUEST DETAILS (for server agent)")
+            logger.info("=" * 80)
+            logger.info(f"Endpoint URL: {url}")
+            logger.info(f"HTTP Method: POST")
+            logger.info(f"Request Headers: {json.dumps(headers)}")
+            logger.info(f"Request Payload (JSON):\n{json.dumps(payload, indent=2)}")
+            logger.info(f"Payload (raw string): {payload_json}")
+            logger.info("=" * 80)
+            
+            response = requests.post(url, json=payload, timeout=10, headers=headers)
+            logger.info(f"Response Status Code: {response.status_code}")
+            logger.info(f"Response Headers: {dict(response.headers)}")
+            logger.debug(f"Response Body: {response.text}")
             response.raise_for_status()
-            logger.info(f"Webhook sent for {filename}")
+            logger.info(f"Webhook sent successfully for {filename}")
             return True
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to send webhook for {filename}: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Response Status: {e.response.status_code}")
+                logger.error(f"Response Body: {e.response.text}")
             return False
 
     def process_pending_uploads(self) -> None:
