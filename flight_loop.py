@@ -753,8 +753,8 @@ class FlightComputer:
                     last_phase = phase
 
                 # Phase-specific telemetry handling
-                if phase in (FlightPhase.ASCENT_LOW, FlightPhase.ASCENT_HIGH):
-                    # Send mocked telemetry every loop interval (every 5 seconds)
+                if phase in (FlightPhase.GROUND, FlightPhase.ASCENT_LOW, FlightPhase.ASCENT_HIGH):
+                    # Send telemetry every loop interval (every 5 seconds)
                     if current_time - self.dispatcher.last_send_time >= self.dispatcher.send_interval:
                         self.dispatcher.send_data(telemetry, gps, phase)
                         self.dispatcher.last_send_time = current_time
