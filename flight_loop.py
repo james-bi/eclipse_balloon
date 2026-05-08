@@ -72,6 +72,7 @@ class SensorManager:
         self.pressure = 1013.25
         self.battery_level = 100.0
         self.use_real_gps = os.getenv("USE_REAL_GPS", "false").lower() == "true"
+        self.simulating_descent = False
         self.last_known_gps = None
         self.gpsd_connected = False
         if self.use_real_gps and gpsd:
@@ -80,6 +81,11 @@ class SensorManager:
                 self.gpsd_connected = True
             except Exception as e:
                 logger.warning(f"Failed to connect to gpsd: {e}")
+
+    def start_descent_simulation(self):
+        """For mock flights, force the altitude to start decreasing."""
+        logger.info("MOCK: Starting simulated descent.")
+        self.simulating_descent = True
 
     def get_telemetry(self) -> Telemetry:
         """
@@ -91,9 +97,14 @@ class SensorManager:
         # Altitude: use GPS if real, else mock
         if not self.use_real_gps:
             # Mock altitude: consistently increase during ascent phase
-            # Simulate realistic sensor variations
-            altitude_change = random.uniform(50, 200)
+            if self.simulating_descent:
+                # Simulate descent
+                altitude_change = random.uniform(-200, -50)
+            else:
+                # Simulate ascent
+                altitude_change = random.uniform(50, 200)
             self.altitude = self.altitude + altitude_change
+            self.altitude = max(0, self.altitude)  # Don't go below ground
 
         # Mock temperature: decreases with altitude (~6.5°C per 1000m) - since sensor not working
         self.temperature = 15.0 - (self.altitude / 1000.0) * 6.5
@@ -723,6 +734,14 @@ class FlightComputer:
                 current_time = time.time()
                 elapsed_time = current_time - start_time
 
+                # --- MOCK FLIGHT SCENARIO ORCHESTRATION ---
+                if is_mock_flight:
+                    # After 5 minutes (300s), start descent and reconnection
+                    if elapsed_time >= 300 and not self.sensor_manager.simulating_descent:
+                        self.sensor_manager.start_descent_simulation()
+                        logger.info("MOCK: Reconnected. Attempting to dump saved log to API...")
+                        threading.Thread(target=self.dispatcher.dump_log_to_api, daemon=True).start()
+
                 # Get sensor data
                 gps = self.sensor_manager.get_gps()
                 telemetry = self.sensor_manager.get_telemetry()
@@ -735,6 +754,9 @@ class FlightComputer:
                     self.sensor_manager.altitude = 0.0 # Reset for next iteration
                 else:
                     phase = self.update_phase(telemetry.altitude)
+
+                # --- MOCK FLIGHT: Radio silence simulation ---
+                mock_radio_silence = is_mock_flight and 120 <= elapsed_time < 300
 
                 # Handle phase transitions
                 if phase != last_phase:
@@ -756,7 +778,11 @@ class FlightComputer:
                 if phase in (FlightPhase.GROUND, FlightPhase.ASCENT_LOW, FlightPhase.ASCENT_HIGH):
                     # Send telemetry every loop interval (every 5 seconds)
                     if current_time - self.dispatcher.last_send_time >= self.dispatcher.send_interval:
-                        self.dispatcher.send_data(telemetry, gps, phase)
+                        if mock_radio_silence:
+                            logger.info("MOCK: Radio silence. Saving to log instead of sending.")
+                            self.dispatcher.save_to_log(telemetry, gps, phase)
+                        else:
+                            self.dispatcher.send_data(telemetry, gps, phase)
                         self.dispatcher.last_send_time = current_time
 
                 elif phase == FlightPhase.NEAR_SPACE:
@@ -766,7 +792,6 @@ class FlightComputer:
                 elif phase in (FlightPhase.DESCENT, FlightPhase.LANDED):
                     # Attempt to send in real-time
                     self.dispatcher.send_data(telemetry, gps, phase)
-
                 # Safety check: Monitor for landing
                 if phase in (FlightPhase.DESCENT, FlightPhase.LANDED):
                     if phase == FlightPhase.LANDED or self.safety_manager.check_landing_imminent(telemetry.altitude):
