@@ -730,7 +730,7 @@ class CameraManager:
                 logger.error(f"Failed to initialize camera: {e}")
                 self.camera = None
         else:
-            logger.warning("Picamera2 not available. Photos will use: libcamera-still > PIL > minimal JPEG")
+            logger.warning("Picamera2 not available. Photos will use: libcamera-still > fswebcam > PIL > minimal JPEG")
 
     def _get_disk_usage_percent(self) -> float:
         """Get current disk usage percentage."""
@@ -787,6 +787,22 @@ class CameraManager:
             )
             logger.info(f"Photo captured with libcamera-still: {filename}")
             return filename
+        except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            pass
+        
+        # Fallback 1.5: Try fswebcam for webcam (development machines)
+        try:
+            result = subprocess.run(
+                ['fswebcam', '-r', '1920x1080', '--jpeg', '95', '-D', '1', filepath],
+                capture_output=True,
+                timeout=10,
+                check=True
+            )
+            if os.path.exists(filepath):
+                logger.info(f"Photo captured with fswebcam: {filename}")
+                return filename
+            else:
+                logger.warning("fswebcam ran but no file created")
         except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             pass
         

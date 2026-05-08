@@ -1,6 +1,6 @@
 from flight_loop import FlightComputer
 
-fc = FlightComputer()
+fc = FlightComputer("test_flight")
 
 # Force 5 mock readings for ascending
 for alt in [1000, 2000, 3000, 4500, 4600]:
