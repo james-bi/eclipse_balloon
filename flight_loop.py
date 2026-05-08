@@ -897,7 +897,7 @@ class FlightComputer:
             descent_threshold: Number of consecutive readings to trigger descent phase.
         """
         self.flight_name = flight_name
-        bucket_name = os.getenv("BUCKET_NAME")
+        bucket_name = os.getenv("S3_BUCKET_NAME")
         api_url = os.getenv("API_URL")
         
         self.sensor_manager = SensorManager()
