@@ -752,15 +752,18 @@ class CameraManager:
                 logger.error(f"Error deleting oldest photo: {e}")
                 break
 
-    def take_photo(self) -> Optional[str]:
+    def take_photo(self, phase: FlightPhase) -> Optional[str]:
         """
         Capture a photo and save locally.
+        
+        Args:
+            phase: Current flight phase.
         
         Returns:
             Filename of captured photo, or None if failed.
         """
-        timestamp = int(time.time())
-        filename = f"{timestamp}.jpg"
+        timestamp_str = time.strftime("%Y-%m-%d_%H-%M-%S")
+        filename = f"{timestamp_str}_{phase.value}.jpg"
         filepath = os.path.join(self.flight_folder, filename)
         
         if self.camera:
@@ -890,6 +893,7 @@ class CameraManager:
                 "s3_url": s3_url,
             }
             url = urllib.parse.urljoin(self.api_url.rstrip('/') + '/', "api/photo/notify/")
+            logger.debug(f"Sending image info webhook. JSON token: {json.dumps(payload)}")
             response = requests.post(url, json=payload, timeout=10)
             response.raise_for_status()
             logger.info(f"Webhook sent for {filename}")
@@ -934,7 +938,7 @@ class CameraManager:
         if self._get_disk_usage_percent() > 75:
             self._delete_oldest_photos()
         
-        filename = self.take_photo()
+        filename = self.take_photo(phase)
         if not filename:
             return
         
