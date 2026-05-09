@@ -154,6 +154,10 @@ class SensorManager:
         self.pressure = 1013.25
         self.battery_level = 100.0
         self.use_real_gps = os.getenv("USE_REAL_GPS", "false").lower() == "true"
+        self.mock_flight_profile = os.getenv("MOCK_FLIGHT_PROFILE", "false").lower() == "true"
+        if not self.use_real_gps:
+            self.mock_flight_profile = True
+            
         self.simulating_descent = False
         self.last_known_gps = None
         self.gpsd_connected = False
@@ -176,8 +180,8 @@ class SensorManager:
         Returns:
             Telemetry object with altitude, temperature, pressure, and battery level.
         """
-        # Altitude: use GPS if real, else mock
-        if not self.use_real_gps:
+        # Altitude: mock if profile simulation is enabled
+        if self.mock_flight_profile:
             # Mock altitude: consistently increase during ascent phase
             if self.simulating_descent:
                 # Simulate descent
@@ -286,7 +290,7 @@ class SensorManager:
                         longitude = getattr(packet, 'lon', 0.0)
                         altitude = getattr(packet, 'alt', 0.0)
                         satellites = getattr(packet, 'sats', 0)
-                        if altitude:
+                        if altitude and not self.mock_flight_profile:
                             self.altitude = altitude
                         
                         current_gps = GPS(
@@ -306,7 +310,8 @@ class SensorManager:
                 # Fallback: Read directly from Quectel modem
                 direct_gps = self._read_quectel_gps()
                 if direct_gps:
-                    self.altitude = direct_gps.altitude
+                    if not self.mock_flight_profile:
+                        self.altitude = direct_gps.altitude
                     self.last_known_gps = direct_gps
                     return direct_gps
                 else:
@@ -1191,7 +1196,7 @@ class FlightComputer:
         start_time = time.time()
         iteration = 0
         last_phase = None
-        is_mock_flight = not self.sensor_manager.use_real_gps
+        is_mock_flight = self.sensor_manager.mock_flight_profile
 
         try:
             while time.time() - start_time < duration:
@@ -1392,15 +1397,20 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Eclipse Balloon Flight Computer")
     parser.add_argument("--name", type=str, help="Override the balloon ID/name from .env")
     parser.add_argument("--mock", action="store_true", help="Run with mock sensor data and skip hardware initialization.")
+    parser.add_argument("--real-gps", action="store_true", help="Use real GPS data for location while in mock mode.")
     args = parser.parse_args()
 
-    if not args.mock:
+    if not args.mock or args.real_gps:
         if not initialize_flight_gps():
             print("Critical failure during setup. Check connections and try again.")
             sys.exit(1)
-    else:
+
+    if args.mock:
         os.environ["USE_REAL_GPS"] = "false"
+        os.environ["MOCK_FLIGHT_PROFILE"] = "true"
         print("--- 🚀 RUNNING IN MOCK MODE - NO HARDWARE REQUIRED ---")
+    if args.real_gps:
+        os.environ["USE_REAL_GPS"] = "true"
 
     if args.name:
         os.environ["BALLOON_ID"] = args.name
