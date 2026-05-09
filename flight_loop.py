@@ -49,6 +49,42 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class LogCaptureHandler(logging.Handler):
+    """Custom logging handler that captures log records for webhook transmission."""
+    
+    def __init__(self, max_buffer_size: int = 100):
+        """
+        Initialize log capture handler.
+        
+        Args:
+            max_buffer_size: Maximum number of log records to buffer before forcing a flush.
+        """
+        super().__init__()
+        self.log_buffer = deque(maxlen=max_buffer_size)
+        self.max_buffer_size = max_buffer_size
+    
+    def emit(self, record: logging.LogRecord) -> None:
+        """Capture log record to buffer."""
+        try:
+            log_entry = {
+                "timestamp": record.created,
+                "level": record.levelname,
+                "message": record.getMessage(),
+                "module": record.module,
+                "function": record.funcName,
+                "line": record.lineno,
+            }
+            self.log_buffer.append(log_entry)
+        except Exception:
+            self.handleError(record)
+    
+    def get_logs(self) -> list:
+        """Get and clear current log buffer."""
+        logs = list(self.log_buffer)
+        self.log_buffer.clear()
+        return logs
+
+
 class FlightPhase(Enum):
     """Enumeration of flight phases."""
     GROUND = "GROUND"
@@ -281,6 +317,12 @@ class TelemetryDispatcher:
         self.last_send_time = 0
         self.send_interval = 5  # seconds for mocked telemetry loop
         self.debug = os.getenv("DEBUG", "false").lower() == "true"
+        
+        # Initialize log capture handler
+        self.log_handler = LogCaptureHandler(max_buffer_size=100)
+        logger.addHandler(self.log_handler)
+        self.last_log_send_time = 0
+        self.log_send_interval = 10  # seconds between log sends
 
         if not self.api_url or not self.balloon_id:
             logger.warning(
@@ -355,6 +397,57 @@ class TelemetryDispatcher:
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to send telemetry: {e}")
             return False
+
+    def send_logs(self) -> bool:
+        """
+        Send buffered log records to API.
+        
+        Returns:
+            True if successful or no logs to send, False on error.
+        """
+        if not self.is_cellular_enabled or not self.api_url:
+            return False
+        
+        # Get logs from the capture handler
+        logs = self.log_handler.get_logs()
+        
+        if not logs:
+            return True  # Nothing to send
+        
+        try:
+            payload = {
+                "balloon_id": self.balloon_id,
+                "logs": logs,
+                "timestamp": time.time(),
+            }
+            
+            url = self._resolve_url("/api/logs/receive/")
+            
+            logger.debug(f"Sending {len(logs)} log records to API")
+            
+            response = requests.post(
+                url,
+                json=payload,
+                timeout=10,
+            )
+            
+            response.raise_for_status()
+            logger.debug(f"Log batch sent successfully ({len(logs)} records)")
+            return True
+        
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to send logs: {e}")
+            # Re-add logs to buffer if send failed
+            for log in logs:
+                self.log_handler.log_buffer.append(log)
+            return False
+    
+    def flush_logs_if_needed(self) -> None:
+        """Check if logs should be flushed based on send interval."""
+        current_time = time.time()
+        if current_time - self.last_log_send_time >= self.log_send_interval:
+            self.send_logs()
+            self.last_log_send_time = current_time
 
     def save_to_log(self, telemetry: Telemetry, gps: GPS, flight_phase: FlightPhase = FlightPhase.GROUND) -> None:
         """
@@ -1127,6 +1220,9 @@ class FlightComputer:
                 
                 # Process any pending photo uploads
                 self.camera_manager.process_pending_uploads()
+                
+                # Flush logs if time interval has elapsed
+                self.dispatcher.flush_logs_if_needed()
                 
                 # Safety check: Monitor for landing
                 if phase in (FlightPhase.DESCENT, FlightPhase.LANDED):
