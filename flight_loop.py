@@ -889,7 +889,7 @@ class CameraManager:
         
         try:
             payload = {
-                "flight_name": self.flight_name,
+                "balloon_id": self.dispatcher.balloon_id,
                 "filename": filename,
                 "s3_url": s3_url,
             }
