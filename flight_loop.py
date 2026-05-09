@@ -426,29 +426,29 @@ class TelemetryDispatcher:
             # Detailed request logging for server agent debugging
             headers = {"Content-Type": "application/json"}
             payload_json = json.dumps(payload)
-            logger.info("=" * 80)
-            logger.info("LOG WEBHOOK REQUEST DETAILS (for server agent)")
-            logger.info("=" * 80)
-            logger.info(f"Endpoint URL: {url}")
-            logger.info(f"HTTP Method: POST")
-            logger.info(f"Request Headers: {json.dumps(headers)}")
-            logger.info(f"Request Payload (JSON):\n{json.dumps(payload, indent=2)}")
-            logger.info(f"Payload (raw string): {payload_json}")
-            logger.info("=" * 80)
+            print("=" * 80)
+            print("LOG WEBHOOK REQUEST DETAILS (for server agent)")
+            print("=" * 80)
+            print(f"Endpoint URL: {url}")
+            print(f"HTTP Method: POST")
+            print(f"Request Headers: {json.dumps(headers)}")
+            print(f"Request Payload (JSON):\n{json.dumps(payload, indent=2)}")
+            print(f"Payload (raw string): {payload_json}")
+            print("=" * 80)
             
             response = requests.post(url, json=payload, timeout=10, headers=headers)
-            logger.info(f"Response Status Code: {response.status_code}")
-            logger.info(f"Response Headers: {dict(response.headers)}")
-            logger.debug(f"Response Body: {response.text}")
+            print(f"Response Status Code: {response.status_code}")
+            print(f"Response Headers: {dict(response.headers)}")
+            print(f"Response Body: {response.text}")
             response.raise_for_status()
-            logger.info(f"Log batch sent successfully ({len(logs)} records)")
+            print(f"Log batch sent successfully ({len(logs)} records)")
             return True
         
         except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to send logs: {e}")
+            print(f"Failed to send logs: {e}")
             if hasattr(e, 'response') and e.response is not None:
-                logger.error(f"Response Status: {e.response.status_code}")
-                logger.error(f"Response Body: {e.response.text}")
+                print(f"Response Status: {e.response.status_code}")
+                print(f"Response Body: {e.response.text}")
             # Re-add logs to buffer if send failed
             for log in logs:
                 self.log_handler.log_buffer.append(log)
