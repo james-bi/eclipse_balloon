@@ -19,10 +19,6 @@ from typing import Dict, List, Optional
 
 import requests
 from dotenv import load_dotenv
-try:
-    import gpsd
-except ImportError:
-    gpsd = None
 
 try:
     from picamera2 import Picamera2
@@ -163,13 +159,6 @@ class SensorManager:
             
         self.simulating_descent = False
         self.last_known_gps = None
-        self.gpsd_connected = False
-        if self.use_real_gps and gpsd:
-            try:
-                gpsd.connect()
-                self.gpsd_connected = True
-            except Exception as e:
-                logger.warning(f"Failed to connect to gpsd: {e}")
 
     def start_descent_simulation(self):
         """For mock flights, force the altitude to start decreasing."""
@@ -271,59 +260,24 @@ class SensorManager:
 
     def get_gps(self) -> GPS:
         """
-        Get GPS data from receiver.
+        Get GPS data from receiver via direct Quectel modem access.
         
         Returns:
             GPS object with latitude, longitude, and satellite count.
         """
         if self.use_real_gps:
-            # Try to connect to gpsd if not connected
-            if not self.gpsd_connected and gpsd:
-                try:
-                    gpsd.connect()
-                    self.gpsd_connected = True
-                except Exception:
-                    pass
-
-            if self.gpsd_connected:
-                try:
-                    packet = gpsd.get_current()
-                    if getattr(packet, 'mode', 0) >= 2:
-                        latitude = getattr(packet, 'lat', 0.0)
-                        longitude = getattr(packet, 'lon', 0.0)
-                        altitude = getattr(packet, 'alt', 0.0)
-                        satellites = getattr(packet, 'sats', 0)
-                        if altitude and not self.mock_flight_profile:
-                            self.altitude = altitude
-                        
-                        current_gps = GPS(
-                            latitude=round(latitude, 6),
-                            longitude=round(longitude, 6),
-                            altitude=round(altitude, 2),
-                            satellites=satellites,
-                        )
-                        self.last_known_gps = current_gps
-                        return current_gps
-                    else:
-                        logger.info("Waiting for GPS Fix (gpsd)...")
-                except Exception as e:
-                    if "NoFixError" not in str(type(e)):
-                        logger.warning(f"Failed to read from gpsd: {e}")
+            # Direct Quectel method (proven, simple, bulletproof)
+            direct_gps = self._read_quectel_gps()
+            if direct_gps:
+                if not self.mock_flight_profile:
+                    self.altitude = direct_gps.altitude
+                self.last_known_gps = direct_gps
+                return direct_gps
             else:
-                # Fallback: Read directly from Quectel modem
-                direct_gps = self._read_quectel_gps()
-                if direct_gps:
-                    if not self.mock_flight_profile:
-                        self.altitude = direct_gps.altitude
-                    self.last_known_gps = direct_gps
-                    return direct_gps
-                else:
-                    logger.info("Waiting for GPS Fix (Quectel fallback)...")
-            
-            if self.last_known_gps:
-                return self.last_known_gps
-            
-            return GPS(latitude=0.0, longitude=0.0, altitude=0.0, satellites=0)
+                logger.info("Waiting for GPS Fix...")
+                if self.last_known_gps:
+                    return self.last_known_gps
+                return GPS(latitude=0.0, longitude=0.0, altitude=0.0, satellites=0)
         
         # Mock GPS: slight drift from launch point (assuming somewhere over Madrid, Spain)
         latitude = 40.4168 + random.uniform(-0.01, 0.01)
