@@ -16,7 +16,22 @@ When starting the flight computer, you can give your balloon a custom name (whic
 ```bash
 python3 flight_loop.py --name "SCOUT_ECLIPSE_1"
 ```
+This project supports both mock simulations and real field tests. For ground testing with real camera, GPS, and cellular connectivity, use:
+```bash
+sudo ./venv/bin/python3 flight_loop.py --name "Walk_Cellular_Test_2" --ground-test --real-gps
+```
 
+The flight computer also includes altitude-based stage control for tethered or incremental tests. Use these flags to control stage boundaries:
+- `--ascent-low-alt <meters>`: upper altitude bound for `ASCENT_LOW` stage
+- `--near-space-alt <meters>`: altitude at which the system enters `NEAR_SPACE`
+- `--emergency-release-alt <meters>`: keep the system in `ASCENT_LOW` until this altitude is exceeded, then resume normal flight profile
+
+Example for a tethered altitude test:
+```bash
+sudo ./venv/bin/python3 flight_loop.py --name "Tether_Test" --real-gps --ascent-low-alt 1000 --near-space-alt 12000 --emergency-release-alt 1000
+```
+
+> Note: `--ground-test` cannot be used together with `--mock`.
 To test the cellular connection while maintaining local network access (e.g., for SSH), use the `--no-wifi` flag. This will remove the default internet route on the WiFi interface, forcing outbound internet traffic to use the cellular connection:
 ```bash
 python3 flight_loop.py --no-wifi

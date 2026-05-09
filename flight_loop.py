@@ -153,8 +153,11 @@ class SensorManager:
         self.temperature = 15.0
         self.pressure = 1013.25
         self.battery_level = 100.0
-        self.use_real_gps = os.getenv("USE_REAL_GPS", "false").lower() == "true"
+        self.ground_test = os.getenv("GROUND_TEST", "false").lower() == "true"
+        self.use_real_gps = os.getenv("USE_REAL_GPS", "false").lower() == "true" or self.ground_test
         self.mock_flight_profile = os.getenv("MOCK_FLIGHT_PROFILE", "false").lower() == "true"
+        if self.ground_test:
+            self.mock_flight_profile = False
         if not self.use_real_gps:
             self.mock_flight_profile = True
             
@@ -1121,13 +1124,25 @@ class CameraManager:
 class FlightComputer:
     """Main flight computer logic."""
 
-    def __init__(self, flight_name: str, descent_threshold: int = 3):
+    def __init__(
+        self,
+        flight_name: str,
+        descent_threshold: int = 3,
+        ascent_low_alt: float = 1000.0,
+        near_space_alt: float = 24000.0,
+        emergency_release_alt: float = 0.0,
+        ground_test: bool = False,
+    ):
         """
         Initialize flight computer.
         
         Args:
             flight_name: Name of the flight.
             descent_threshold: Number of consecutive readings to trigger descent phase.
+            ascent_low_alt: Upper altitude bound for ASCENT_LOW.
+            near_space_alt: Altitude above which the flight enters NEAR_SPACE.
+            emergency_release_alt: Hold low-ascent until this altitude is reached.
+            ground_test: If True, keep the flight in low-ascent mode for ground testing.
         """
         self.flight_name = flight_name
         bucket_name = os.getenv("S3_BUCKET_NAME")
@@ -1140,6 +1155,11 @@ class FlightComputer:
         self.current_phase = FlightPhase.GROUND
         self.altitude_history = deque(maxlen=descent_threshold)
         self.descent_threshold = descent_threshold
+        self.ascent_low_alt = ascent_low_alt
+        self.near_space_alt = near_space_alt
+        self.emergency_release_alt = emergency_release_alt
+        self.ground_test = ground_test
+        self.emergency_release_reached = emergency_release_alt <= 0.0
         self.max_altitude = 0.0
 
     def update_phase(self, altitude: float) -> FlightPhase:
@@ -1155,7 +1175,18 @@ class FlightComputer:
         self.max_altitude = max(self.max_altitude, altitude)
         self.altitude_history.append(altitude)
 
-        # Check for descent: 3 consecutive readings with decreasing altitude, and only if max_altitude > 4000m
+        if self.ground_test:
+            self.current_phase = FlightPhase.ASCENT_LOW
+            return self.current_phase
+
+        if self.emergency_release_alt > 0 and not self.emergency_release_reached:
+            if altitude >= self.emergency_release_alt:
+                self.emergency_release_reached = True
+            else:
+                self.current_phase = FlightPhase.ASCENT_LOW
+                return self.current_phase
+
+        # Check for descent: consecutive decreasing readings and a significant peak altitude.
         in_descent = (
             len(self.altitude_history) == self.descent_threshold
             and all(
@@ -1169,11 +1200,14 @@ class FlightComputer:
             self.current_phase = FlightPhase.DESCENT
         elif self.current_phase == FlightPhase.DESCENT and altitude < 100:
             self.current_phase = FlightPhase.LANDED
-        elif self.current_phase in (FlightPhase.GROUND, FlightPhase.ASCENT_LOW, FlightPhase.ASCENT_HIGH):
-            # Determine ascent phase
-            if altitude < 1000:
+        elif self.current_phase in (
+            FlightPhase.GROUND,
+            FlightPhase.ASCENT_LOW,
+            FlightPhase.ASCENT_HIGH,
+        ):
+            if altitude < self.ascent_low_alt:
                 self.current_phase = FlightPhase.ASCENT_LOW
-            elif altitude < 24000:
+            elif altitude < self.near_space_alt:
                 self.current_phase = FlightPhase.ASCENT_HIGH
             else:
                 self.current_phase = FlightPhase.NEAR_SPACE
@@ -1273,8 +1307,14 @@ class FlightComputer:
                 self.dispatcher.flush_logs_if_needed()
                 
                 # Safety check: Monitor for landing
+                skip_landing_checks = self.ground_test or (
+                    self.emergency_release_alt > 0 and not self.emergency_release_reached
+                )
                 if phase in (FlightPhase.DESCENT, FlightPhase.LANDED):
-                    if phase == FlightPhase.LANDED or self.safety_manager.check_landing_imminent(telemetry.altitude):
+                    if not skip_landing_checks and (
+                        phase == FlightPhase.LANDED
+                        or self.safety_manager.check_landing_imminent(telemetry.altitude)
+                    ):
                         # Print final status before shutdown
                         elapsed = int(time.time() - start_time)
                         print(f"[{elapsed:04d}s] Iteration {iteration}")
@@ -1397,20 +1437,39 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Eclipse Balloon Flight Computer")
     parser.add_argument("--name", type=str, help="Override the balloon ID/name from .env")
     parser.add_argument("--mock", action="store_true", help="Run with mock sensor data and skip hardware initialization.")
-    parser.add_argument("--real-gps", action="store_true", help="Use real GPS data for location while in mock mode.")
+    parser.add_argument("--real-gps", action="store_true", help="Use real GPS data instead of mocked location.")
+    parser.add_argument("--ground-test", action="store_true", help="Run a real hardware ground test with camera, GPS, and cellular enabled in low-ascent mode.")
+    parser.add_argument("--ascent-low-alt", type=float, default=1000.0, help="Upper altitude bound for ASCENT_LOW (meters).")
+    parser.add_argument("--near-space-alt", type=float, default=24000.0, help="Altitude above which the flight enters NEAR_SPACE (meters).")
+    parser.add_argument("--emergency-release-alt", type=float, default=0.0, help="Hold low-ascent until altitude exceeds this value; then resume normal flight behavior.")
     args = parser.parse_args()
 
-    if not args.mock or args.real_gps:
-        if not initialize_flight_gps():
-            print("Critical failure during setup. Check connections and try again.")
-            sys.exit(1)
+    if args.ground_test and args.mock:
+        parser.error("--ground-test cannot be used with --mock")
+
+    if args.ground_test:
+        args.real_gps = True
+        os.environ["GROUND_TEST"] = "true"
 
     if args.mock:
         os.environ["USE_REAL_GPS"] = "false"
         os.environ["MOCK_FLIGHT_PROFILE"] = "true"
         print("--- 🚀 RUNNING IN MOCK MODE - NO HARDWARE REQUIRED ---")
+
     if args.real_gps:
         os.environ["USE_REAL_GPS"] = "true"
+        if not args.mock:
+            os.environ["MOCK_FLIGHT_PROFILE"] = "false"
+
+    if args.ground_test:
+        os.environ["USE_REAL_GPS"] = "true"
+        os.environ["MOCK_FLIGHT_PROFILE"] = "false"
+        print("--- 🚀 RUNNING IN GROUND TEST MODE ---")
+
+    if not args.mock or args.real_gps or args.ground_test:
+        if not initialize_flight_gps():
+            print("Critical failure during setup. Check connections and try again.")
+            sys.exit(1)
 
     if args.name:
         os.environ["BALLOON_ID"] = args.name
@@ -1420,5 +1479,11 @@ if __name__ == "__main__":
         print("Error: Flight name not set. Use --name or set BALLOON_ID in .env")
         sys.exit(1)
 
-    flight_computer = FlightComputer(flight_name)
+    flight_computer = FlightComputer(
+        flight_name,
+        ascent_low_alt=args.ascent_low_alt,
+        near_space_alt=args.near_space_alt,
+        emergency_release_alt=args.emergency_release_alt,
+        ground_test=args.ground_test,
+    )
     flight_computer.run()
