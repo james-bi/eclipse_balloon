@@ -64,14 +64,45 @@ class LogCaptureHandler(logging.Handler):
         self.max_buffer_size = max_buffer_size
     
     def emit(self, record: logging.LogRecord) -> None:
-        """Capture log record to buffer."""
+        """Capture log record to buffer, filtering out webhook/API noise."""
         try:
+            # Filter out webhook and API debug messages to avoid recursive logging
+            message = record.getMessage()
+            function = record.funcName
+            
+            # Skip webhook debug messages
+            if any(keyword in message for keyword in [
+                "WEBHOOK REQUEST DETAILS",
+                "DEBUG: API REQUEST", 
+                "DEBUG: API RESPONSE",
+                "Response Status Code",
+                "Response Headers", 
+                "Response Body",
+                "Log batch sent successfully",
+                "Webhook sent successfully",
+                "Telemetry sent successfully",
+                "Payload (raw string):",
+                "Endpoint URL:",
+                "HTTP Method:",
+                "Request Headers:",
+                "Request Payload (JSON):"
+            ]):
+                return
+            
+            # Skip webhook-related function calls
+            if function in ["send_webhook", "send_data", "send_logs", "flush_logs_if_needed"]:
+                return
+            
+            # Skip lines with lots of equals signs (debug separators)
+            if "=" * 10 in message:
+                return
+            
             log_entry = {
                 "timestamp": record.created,
                 "level": record.levelname,
-                "message": record.getMessage(),
+                "message": message,
                 "module": record.module,
-                "function": record.funcName,
+                "function": function,
                 "line": record.lineno,
             }
             self.log_buffer.append(log_entry)
@@ -322,7 +353,7 @@ class TelemetryDispatcher:
         self.log_handler = LogCaptureHandler(max_buffer_size=100)
         logger.addHandler(self.log_handler)
         self.last_log_send_time = 0
-        self.log_send_interval = 10  # seconds between log sends
+        self.log_send_interval = 30  # seconds between log sends
 
         if not self.api_url or not self.balloon_id:
             logger.warning(
