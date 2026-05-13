@@ -10,6 +10,64 @@ Before running the flight computer on the Raspberry Pi, ensure you have the nece
 sudo apt-get update
 sudo apt-get install -y gpsd gpsd-clients modemmanager iproute2 usbutils
 ```
+### Prerequisites (Raspberry Pi Flight Preparation)
+
+1: Get to working directory in the pi, run these commands:
+
+```bash
+cd Repos/balloon/
+source venv/bin/activate
+cd eclipse_balloon/
+```
+
+The prompt mshould now look like this, note `venv`
+
+```bash
+(venv) scouts@scoutspi:~/Repos/balloon/eclipse_balloon $
+```
+
+2: Check networks connected:
+
+```bash
+nmcli device status
+```
+
+Output needs to include `wlan0` equal to `wifi / connected` and `usb0` equal to `ethernet Sixfab4G` *IMPORTANT* as so:
+
+```bash
+DEVICE         TYPE      STATE                   CONNECTION  
+wlan0          wifi      connected               MIWIFI_gRGQ 
+usb0           ethernet  connected               Sixfab_4G   
+lo             loopback  connected (externally)  lo          
+p2p-dev-wlan0  wifi-p2p  disconnected            --     
+```
+
+3: Initialise GPS - This could take up to 20 minutes:
+
+Make sure the prompt looks like this, if not go back and do step 1 again:
+
+```bash
+(venv) scouts@scoutspi:~/Repos/balloon/eclipse_balloon $
+```
+
+Run the GPS intialise command:
+
+```bash
+python initialise_gps.py
+```
+
+Wait for these lines:
+
+```bash
+[INFO] --- Initialization Complete! ---
+[INFO] Bhai, take the Pi outside now. Waiting for the satellites to say hello.
+```
+
+Run the GPS test command, this finds satellites, so it may take some time, up to 20 minutes:
+
+```bash
+python test_gps.py
+```
 
 ### 🚀 Quick Start
 When starting the flight computer, you can give your balloon a custom name (which overrides the `BALLOON_ID` in your `.env` file) by passing the `--name` argument:
