@@ -823,6 +823,16 @@ class CameraManager:
                 )
                 self.camera.configure(config)
                 self.camera.start()
+
+                # Allow the camera's automatic exposure and white balance to settle
+                # before taking the first picture. This is especially important on
+                # bright, high-altitude scenes where the camera may initially overexpose.
+                try:
+                    self.camera.set_controls({"AeEnable": True, "AwbEnable": True})
+                except Exception as e:
+                    logger.debug(f"Picamera2 exposure control setup failed: {e}")
+                time.sleep(1.5)
+
                 logger.info("Camera initialized successfully (Picamera2)")
             except Exception as e:
                 logger.error(f"Failed to initialize camera: {e}")
@@ -850,12 +860,13 @@ class CameraManager:
                 logger.error(f"Error deleting oldest photo: {e}")
                 break
 
-    def take_photo(self, phase: FlightPhase) -> Optional[str]:
+    def take_photo(self, phase: FlightPhase, altitude: float = 0.0) -> Optional[str]:
         """
         Capture a photo and save locally.
         
         Args:
             phase: Current flight phase.
+            altitude: Current altitude in meters.
         
         Returns:
             Filename of captured photo, or None if failed.
@@ -867,23 +878,90 @@ class CameraManager:
         if self.camera:
             # Use Picamera2 if available
             try:
-                stream = io.BytesIO()
-                self.camera.capture_file(stream, format='jpeg')
-                stream.seek(0)
-                with open(filepath, 'wb') as f:
-                    f.write(stream.getvalue())
-                logger.info(f"Photo captured: {filename}")
+                max_retries = 3
+                # Starting defaults for manual exposure
+                exposure_time = 10000 if altitude > 20000 else 20000
+                analogue_gain = 1.0
+
+                # Initial exposure setup
+                if altitude > 20000:
+                    self.camera.set_controls({
+                        "ExposureTime": exposure_time,
+                        "AnalogueGain": analogue_gain,
+                        "AeEnable": False,  # Disable auto exposure
+                        "AwbEnable": True   # Keep auto white balance
+                    })
+                else:
+                    self.camera.set_controls({"AeEnable": True, "AwbEnable": True})
+                
+                for attempt in range(max_retries):
+                    # Give the camera a short moment to settle before capture.
+                    time.sleep(0.5)
+                    
+                    stream = io.BytesIO()
+                    self.camera.capture_file(stream, format='jpeg')
+                    
+                    # Save to disk (overwrites previous attempts on disk)
+                    stream.seek(0)
+                    with open(filepath, 'wb') as f:
+                        f.write(stream.getvalue())
+                        
+                    if not pil_available:
+                        break  # Cannot analyze image without PIL
+                        
+                    # Analyze a low-resolution 'preview' of the image
+                    stream.seek(0)
+                    try:
+                        img = Image.open(stream).convert('L') # Convert to grayscale
+                        img.thumbnail((128, 128)) # Resize for fast pixel analysis
+                        pixels = list(img.getdata())
+                        avg_brightness = sum(pixels) / float(len(pixels))
+                        
+                        logger.info(f"Exposure check {attempt+1}/{max_retries}: Brightness = {avg_brightness:.2f}")
+                        
+                        # Check if exposure is acceptable (0=black, 255=white)
+                        if 80 <= avg_brightness <= 220:
+                            break  # Good exposure, stop retrying
+                            
+                        # Need to adjust. Switch to manual exposure if not already
+                        self.camera.set_controls({"AeEnable": False})
+                        
+                        if avg_brightness > 220:
+                            # Overexposed (white-out), decrease shutter speed (exposure time) and gain
+                            exposure_time = max(100, int(exposure_time * 0.5))
+                            analogue_gain = max(1.0, analogue_gain * 0.8)
+                        else:
+                            # Underexposed (too dark), increase shutter speed (exposure time) and gain
+                            exposure_time = min(100000, int(exposure_time * 1.5))
+                            analogue_gain = min(8.0, analogue_gain * 1.2)
+                            
+                        self.camera.set_controls({
+                            "ExposureTime": exposure_time,
+                            "AnalogueGain": analogue_gain
+                        })
+                        logger.info(f"Adjusted camera controls: Exposure={exposure_time}us, Gain={analogue_gain:.2f}")
+                        
+                    except Exception as e:
+                        logger.error(f"Dynamic exposure adjustment failed: {e}")
+                        break
+                        
+                logger.info(f"Photo captured: {filename} with final brightness adjusted.")
                 return filename
             except Exception as e:
                 logger.error(f"Failed to capture photo with Picamera2: {e}")
                 return None
         
-        # Fallback 1: Try libcamera-still command-line tool (Raspberry Pi)
+        # Fallback 1: Try libcamera-still command-line tool (Raspberry Pi).
+        # Give the camera time to settle auto exposure and white balance before capture
+        # so that bright sky/altitude conditions do not produce blown-out images.
         try:
+            # Adjust gain for high altitude
+            gain = '1.0' if altitude <= 20000 else '0.5'  # Lower gain at high altitude
+            shutter = '2000' if altitude <= 20000 else '1000'  # Shorter exposure at high altitude
             result = subprocess.run(
-                ['libcamera-still', '-o', filepath, '-t', '1'],
+                ['libcamera-still', '-o', filepath, '-t', shutter, '--gain', gain],
                 capture_output=True,
-                timeout=5,
+                timeout=10,
                 check=True
             )
             logger.info(f"Photo captured with libcamera-still: {filename}")
@@ -1039,12 +1117,13 @@ class CameraManager:
         except Exception as e:
             logger.error(f"Error processing pending uploads: {e}")
 
-    def capture_and_upload(self, phase: FlightPhase) -> None:
+    def capture_and_upload(self, phase: FlightPhase, altitude: float = 0.0) -> None:
         """
         Capture photo if interval has passed, upload if possible.
         
         Args:
             phase: Current flight phase.
+            altitude: Current altitude in meters.
         """
         current_time = time.time()
         interval = self.capture_intervals.get(phase, 30)
@@ -1056,7 +1135,7 @@ class CameraManager:
         if self._get_disk_usage_percent() > 75:
             self._delete_oldest_photos()
         
-        filename = self.take_photo(phase)
+        filename = self.take_photo(phase, altitude)
         if not filename:
             return
         
@@ -1214,7 +1293,7 @@ class FlightComputer:
                     phase = self.update_phase(telemetry.altitude)
 
                 # Capture and upload photos based on phase
-                self.camera_manager.capture_and_upload(phase)
+                self.camera_manager.capture_and_upload(phase, telemetry.altitude)
 
                 # --- MOCK FLIGHT: Radio silence simulation ---
                 mock_radio_silence = is_mock_flight and 120 <= elapsed_time < 300
