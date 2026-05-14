@@ -12,6 +12,14 @@ sudo apt-get install -y gpsd gpsd-clients modemmanager iproute2 usbutils
 ```
 ### Prerequisites (Raspberry Pi Flight Preparation)
 
+1: SSH into the flight computer:
+
+Make sure both the computer and the pi are connected top the same network:
+
+```bash
+ssh scouts@scoutspi.local
+```
+
 1: Get to working directory in the pi, run these commands:
 
 ```bash
