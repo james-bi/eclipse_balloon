@@ -85,6 +85,11 @@ python test_gps.py
 screen -S scouts
 ```
 
+Then reactivate the virtual environment:
+```bash
+source venv/bin/activate
+```
+
 When starting the flight computer, you can give your balloon a custom name (which overrides the `BALLOON_ID` in your `.env` file) by passing the `--name` argument:
 ```bash
 python3 flight_loop.py --name "SCOUT_ECLIPSE_1"
